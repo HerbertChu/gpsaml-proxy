@@ -149,8 +149,12 @@ def user_exists(user: str) -> bool:
 
 
 def ensure_user(user: str):
+    # /bin/bash, not /usr/sbin/nologin — sshd's `command="…"` won't fire
+    # for nologin shells (it prints "This account is currently not
+    # available." and exits). Security comes from `restrict,…,command=`
+    # in authorized_keys + the per-user sudoers scope, not the shell.
     if not user_exists(user):
-        run(USERADD, "-m", "-s", "/usr/sbin/nologin", "-g", GROUP, user)
+        run(USERADD, "-m", "-s", "/bin/bash", "-g", GROUP, user)
     else:
         run(USERMOD, "-aG", GROUP, user, capture=True)
 
