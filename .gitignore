@@ -1,0 +1,34 @@
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Node
+node_modules/
+dist/
+release/
+
+# Secrets / runtime artefacts
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+authorized_keys
+/tmp/
+*.log
+
+# PoC scratch
+poc/scratch/
+
+# Claude Code skill artefacts (auto-generated, not project source)
+.agents/
+skills-lock.json
