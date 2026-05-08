@@ -294,6 +294,15 @@ def remove_nat(octet: int):
 # ── openconnect ─────────────────────────────────────────────────────
 def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
                      fingerprint: str) -> bool:
+    """
+    Returns True iff a tun device shows up inside the namespace within
+    the deadline. The openconnect process is left running in the
+    background (it will daemonize itself with --background); we don't
+    block on its parent's exit because some openconnect builds linger
+    in the foreground for a few extra seconds after writing the pid
+    file, which used to make the web's call_provision time out long
+    after the tunnel was actually usable.
+    """
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     pid_file = RUNTIME_DIR / f"{user}.pid"
     pid_file.unlink(missing_ok=True)
@@ -318,18 +327,32 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
         "--syslog",
         gateway,
     ]
-    run(*cmd, env=env)
 
-    # Poll briefly for pidfile + a tun device showing up inside the netns.
-    for _ in range(30):
+    proc = subprocess.Popen(cmd, env=env)
+
+    # Poll for either: tun device up inside the ns (success) OR the
+    # openconnect parent exiting non-zero (auth fail, HIP segfault, …).
+    deadline = time.time() + 60.0
+    while time.time() < deadline:
         time.sleep(0.5)
+        rc = proc.poll()
+        if rc is not None and rc != 0:
+            return False
         if not pid_file.exists():
             continue
-        out = subprocess.run(
-            [IP, "-n", ns, "link", "show"], capture_output=True, text=True,
-        ).stdout
-        if "tun0" in out or "utun" in out:
+        link_show = subprocess.run(
+            [IP, "-n", ns, "link", "show"],
+            capture_output=True, text=True, check=False,
+        )
+        if "tun0" in link_show.stdout or "utun" in link_show.stdout:
             return True
+
+    # Deadline hit. Kill the parent so we don't leak it; the daemonized
+    # child (if any) is dealt with by cmd_down's pidfile path.
+    try:
+        proc.kill()
+    except OSError:
+        pass
     return False
 
 
