@@ -51,14 +51,16 @@ def verify_hmac():
 
 # ── helper invocation ──────────────────────────────────────────────
 def call_provision(*args: str) -> subprocess.CompletedProcess:
-    # 60s isn't enough: a "warm reconnect" calls cmd_down (which can
-    # take ~10s waiting for the previous openconnect to drop) and then
-    # cmd_up (~30s for HIP + auth + tunnel-up poll). Budget 3 min.
+    # First observed successful run took ~168s end-to-end (HIP + auth +
+    # tunnel-up). spawn_openconnect's own deadline is 150s; give the
+    # outer call enough headroom for cmd_down rollback (10s SIGTERM
+    # grace + setup), so 300s total. gunicorn worker timeout is 180s
+    # by default — must also be bumped (see systemd unit).
     return subprocess.run(
         ["sudo", "-n", PROVISION, *args],
         capture_output=True,
         text=True,
-        timeout=180,
+        timeout=300,
     )
 
 

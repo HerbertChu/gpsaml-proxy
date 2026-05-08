@@ -50,6 +50,17 @@ VISUDO = "/usr/sbin/visudo"
 
 
 # ── small helpers ───────────────────────────────────────────────────
+_T0 = time.monotonic()
+
+
+def trace(msg: str) -> None:
+    """Timestamped stderr trace. Used to figure out which provision
+    phase is hanging when the web's subprocess.run() times us out — the
+    web logs our stderr verbatim into provision.log on rc!=0, and we
+    can also tail it on the box."""
+    print(f"[{time.monotonic() - _T0:6.2f}s] {msg}", file=sys.stderr, flush=True)
+
+
 def run(*args, check=True, capture=False, env=None):
     kw = {"check": check, "env": env}
     if capture:
@@ -328,16 +339,30 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
         gateway,
     ]
 
+    trace(f"spawn_openconnect: launching openconnect (gateway={gateway})")
     proc = subprocess.Popen(cmd, env=env)
 
     # Poll for either: tun device up inside the ns (success) OR the
     # openconnect parent exiting non-zero (auth fail, HIP segfault, …).
-    deadline = time.time() + 60.0
+    # 60s isn't always enough — first observed successful run took ~168s
+    # end-to-end (HIP submission to a remote PAN gateway is the long
+    # pole). Budget 150s here; web's call_provision timeout (300s) sits
+    # on top of this with room for cmd_down rollback and setup.
+    deadline = time.time() + 150.0
+    last_log = time.time()
     while time.time() < deadline:
         time.sleep(0.5)
         rc = proc.poll()
         if rc is not None and rc != 0:
+            trace(f"spawn_openconnect: openconnect parent exited rc={rc}")
             return False
+        if time.time() - last_log >= 10.0:
+            last_log = time.time()
+            trace(
+                f"spawn_openconnect: still waiting "
+                f"(elapsed={int(time.time() - (deadline - 150))}s, "
+                f"pid_file={pid_file.exists()}, parent_alive={rc is None})"
+            )
         if not pid_file.exists():
             continue
         link_show = subprocess.run(
@@ -345,10 +370,10 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
             capture_output=True, text=True, check=False,
         )
         if "tun0" in link_show.stdout or "utun" in link_show.stdout:
+            trace("spawn_openconnect: tun0 up")
             return True
 
-    # Deadline hit. Kill the parent so we don't leak it; the daemonized
-    # child (if any) is dealt with by cmd_down's pidfile path.
+    trace("spawn_openconnect: deadline hit, no tun0; killing parent")
     try:
         proc.kill()
     except OSError:
@@ -357,25 +382,59 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
 
 
 def kill_openconnect(user: str):
+    """Kill any openconnect for `user`. Tries the pidfile first, then
+    sweeps process table for orphans (previous runs killed mid-flight by
+    the web's subprocess timeout leak daemonized openconnects that the
+    pidfile alone won't catch — the next `up` would see them piling up
+    in the user's netns)."""
     pid_file = RUNTIME_DIR / f"{user}.pid"
-    if not pid_file.exists():
-        return
+    pids: set[int] = set()
+    if pid_file.exists():
+        try:
+            pids.add(int(pid_file.read_text().strip()))
+        except (ValueError, FileNotFoundError):
+            pass
+
+    # pgrep for any openconnect whose argv mentions this user (`-u <user>`
+    # appears in the command line we spawn). pgrep -f matches against
+    # full cmdline.
     try:
-        pid = int(pid_file.read_text().strip())
-    except (ValueError, FileNotFoundError):
-        return
-    try:
-        os.kill(pid, 15)  # SIGTERM
-        for _ in range(20):
+        out = subprocess.check_output(
+            ["pgrep", "-f", f"openconnect.*-u {user}( |$)"], text=True
+        )
+        for line in out.split():
+            line = line.strip()
+            if line.isdigit():
+                pids.add(int(line))
+    except subprocess.CalledProcessError:
+        pass  # no matches
+
+    for pid in pids:
+        try:
+            os.kill(pid, 15)  # SIGTERM
+        except ProcessLookupError:
+            continue
+    # Wait up to 10s for graceful exits, then SIGKILL stragglers.
+    deadline = time.time() + 10.0
+    while time.time() < deadline and pids:
+        alive = set()
+        for pid in pids:
             try:
                 os.kill(pid, 0)
+                alive.add(pid)
             except ProcessLookupError:
-                break
-            time.sleep(0.5)
-        else:
-            os.kill(pid, 9)  # SIGKILL fallback
-    except ProcessLookupError:
-        pass
+                pass
+        if not alive:
+            pids = alive
+            break
+        pids = alive
+        time.sleep(0.5)
+    for pid in pids:
+        try:
+            trace(f"kill_openconnect: SIGKILL stuck pid {pid}")
+            os.kill(pid, 9)
+        except ProcessLookupError:
+            pass
     pid_file.unlink(missing_ok=True)
 
 
@@ -389,6 +448,7 @@ def cleanup_netns_resolvconf(ns: str):
 
 # ── top-level commands ──────────────────────────────────────────────
 def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
+    trace(f"cmd_up: start user={user} gateway={gateway}")
     assert_user(user)
     ensure_group()
     ensure_user(user)
@@ -397,16 +457,20 @@ def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
     # cookie reject, segfault…) it can leave a half-built ns + a stranded
     # openconnect process behind. Tearing down first guarantees a clean
     # slate; cmd_down is itself a no-op when nothing is running.
+    trace("cmd_up: cleanup stale state")
     cmd_down(user)
 
+    trace("cmd_up: acquire subnet")
     octet, host_ip, ns_ip = acquire_subnet(user)
     ns = ns_for(user)
 
+    trace(f"cmd_up: setup netns/veth/nat (ns={ns} octet={octet})")
     ensure_ip_forward()
     ensure_netns(ns)
     setup_veth(user, ns, host_ip, ns_ip)
     ensure_nat(octet)
 
+    trace("cmd_up: gen keypair + write authorized_keys + sudoers")
     priv_key, pub_key = gen_keypair(user)
     write_authorized_keys(user, pub_key, ns)
     write_sudoers(user, ns)
@@ -414,21 +478,25 @@ def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
     ok = spawn_openconnect(user, ns, cookie, gateway, fingerprint)
     if not ok:
         # tunnel didn't come up — best-effort rollback so a retry is clean
+        trace("cmd_up: spawn_openconnect failed; rolling back")
         cmd_down(user)
-        sys.exit("openconnect failed to bring tunnel up within 15 s")
+        sys.exit("openconnect failed to bring tunnel up within deadline")
 
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (RUNTIME_DIR / f"{user}.alive").touch()
 
+    trace("cmd_up: done, writing private key to stdout")
     # Private key on stdout for the web to pick up. Web must NOT log it.
     sys.stdout.write(priv_key)
 
 
 def cmd_down(user: str):
+    trace(f"cmd_down: start user={user}")
     assert_user(user)
     ns = ns_for(user)
 
     kill_openconnect(user)
+    trace("cmd_down: openconnect killed; tearing down netns/veth/nat")
     cleanup_netns_resolvconf(ns)
     del_netns(ns)
     remove_veth(user)
