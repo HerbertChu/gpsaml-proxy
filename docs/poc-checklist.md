@@ -3,7 +3,7 @@
 Each gate must clear before the next one is worth building. If gate 1
 fails the project is dead — abandon it cheerfully.
 
-## Gate 1 — Cloud reachability
+## Gate 1 — Cloud reachability ✅ PASS (2026-05-08)
 
 **Question:** can a generic public-cloud Linux VM reach the
 GlobalProtect portal at all?
@@ -15,9 +15,18 @@ real employee laptop on a residential ISP.
 **How to test:** `poc/01-cloud-reachability.sh` from any cloud VM.
 Pass / fail criteria are in the script.
 
+**Result:** ran from a `t3.nano` in `ap-northeast-1` (egress IP
+`13.114.137.91`, Tokyo) hitting `vpn.vistancenetworks.com`. The
+portal answered `HTTP 200` with a fully-formed `<prelogin-response>`
+including a fresh `<saml-request>` and `<region>JP</region>`. No IP
+allowlist, no geofence rejecting non-corp egress; the SAML challenge
+shape is identical to the one a laptop run of gpsaml receives.
+
 **Decision:** if the prelogin endpoint refuses TLS, returns 4xx, or
 returns an XML error, stop. The bastion design is unworkable without
 IT support to whitelist the bastion's egress IP.
+
+→ Cleared. Move to Gate 2.
 
 ## Gate 2 — HIP-passing openconnect from cloud
 
