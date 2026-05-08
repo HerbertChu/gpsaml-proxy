@@ -14,7 +14,7 @@ Environment=PORT=8080
 ExecStart=/opt/gpsaml-proxy/venv/bin/gunicorn \
     --workers 2 \
     --bind 0.0.0.0:8080 \
-    --timeout 120 \
+    --timeout 180 \
     --access-logfile /var/log/gpsaml-proxy/access.log \
     --error-logfile  /var/log/gpsaml-proxy/error.log \
     app:app

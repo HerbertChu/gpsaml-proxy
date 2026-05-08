@@ -51,11 +51,14 @@ def verify_hmac():
 
 # ── helper invocation ──────────────────────────────────────────────
 def call_provision(*args: str) -> subprocess.CompletedProcess:
+    # 60s isn't enough: a "warm reconnect" calls cmd_down (which can
+    # take ~10s waiting for the previous openconnect to drop) and then
+    # cmd_up (~30s for HIP + auth + tunnel-up poll). Budget 3 min.
     return subprocess.run(
         ["sudo", "-n", PROVISION, *args],
         capture_output=True,
         text=True,
-        timeout=60,
+        timeout=180,
     )
 
 
