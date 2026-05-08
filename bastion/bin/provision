@@ -369,6 +369,13 @@ def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
     assert_user(user)
     ensure_group()
     ensure_user(user)
+
+    # Idempotency: if a previous `up` was interrupted (gunicorn timeout,
+    # cookie reject, segfault…) it can leave a half-built ns + a stranded
+    # openconnect process behind. Tearing down first guarantees a clean
+    # slate; cmd_down is itself a no-op when nothing is running.
+    cmd_down(user)
+
     octet, host_ip, ns_ip = acquire_subnet(user)
     ns = ns_for(user)
 
