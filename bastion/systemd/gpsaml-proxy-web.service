@@ -1,0 +1,29 @@
+[Unit]
+Description=gpsaml-proxy web / API
+Documentation=https://github.com/HerbertChu/gpsaml-proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gpw
+Group=gpw
+WorkingDirectory=/opt/gpsaml-proxy/web
+Environment=GPSAML_PROXY_SECRET=/etc/gpsaml-proxy/secret
+Environment=PORT=8080
+ExecStart=/opt/gpsaml-proxy/venv/bin/gunicorn \
+    --workers 2 \
+    --bind 0.0.0.0:8080 \
+    --access-logfile /var/log/gpsaml-proxy/access.log \
+    --error-logfile  /var/log/gpsaml-proxy/error.log \
+    app:app
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=false       # gpw needs sudo, which requires setuid
+ProtectSystem=strict
+ReadWritePaths=/var/log/gpsaml-proxy /var/run/gpsaml-proxy
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

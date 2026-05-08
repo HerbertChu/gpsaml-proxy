@@ -135,3 +135,58 @@ ssh -i /tmp/test-key/id -o StrictHostKeyChecking=no hc1079@localhost
 The first command should print the namespace's `lo` and `vp_<user>`
 interfaces (and `tun0` once a tunnel is up). The second should return
 `gpsaml-proxy: interactive shells are not permitted`.
+
+## Phase 5a — Web / API service
+
+```sh
+# unprivileged service account
+useradd -r -s /usr/sbin/nologin -d /opt/gpsaml-proxy/web -M gpw
+
+# install web app
+install -d -m 755 /opt/gpsaml-proxy/web
+install -m 644 -o root -g root \
+  bastion/web/app.py            /opt/gpsaml-proxy/web/
+install -m 644 -o root -g root \
+  bastion/web/requirements.txt  /opt/gpsaml-proxy/web/
+
+# Python venv (avoid polluting system pip)
+python3 -m venv /opt/gpsaml-proxy/venv
+/opt/gpsaml-proxy/venv/bin/pip install -r /opt/gpsaml-proxy/web/requirements.txt
+
+# shared HMAC secret (rotate on rebuild)
+install -d -m 750 -o gpw -g gpw /etc/gpsaml-proxy
+head -c 32 /dev/urandom | base64 > /etc/gpsaml-proxy/secret
+chown gpw:gpw /etc/gpsaml-proxy/secret
+chmod 0400 /etc/gpsaml-proxy/secret
+
+# logs
+install -d -m 750 -o gpw -g gpw /var/log/gpsaml-proxy
+
+# sudoers entry for gpw → provision
+install -m 0440 -o root -g root \
+  bastion/etc/sudoers-web.conf  /etc/sudoers.d/gpsaml-proxy-web
+visudo -cf /etc/sudoers.d/gpsaml-proxy-web
+
+# systemd unit
+install -m 644 -o root -g root \
+  bastion/systemd/gpsaml-proxy-web.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now gpsaml-proxy-web
+
+# sanity
+curl -fsS http://127.0.0.1:8080/healthz
+```
+
+A signed test against the API (auth-only, expects to fail at the
+provision call because we have no real cookie):
+
+```sh
+SECRET=$(cat /etc/gpsaml-proxy/secret)
+BODY='{"username":"hc1079","authcookie":"x","gateway":"vpn.example.com","fingerprint":"AA"}'
+SIG=$(printf %s "$BODY" | openssl dgst -sha256 -hmac "$SECRET" -hex | awk '{print $2}')
+curl -sS -X POST -H "Content-Type: application/json" \
+  -H "X-GPSAML-Signature: $SIG" \
+  -d "$BODY" http://127.0.0.1:8080/api/connect
+# expected: 500 / "provision failed" because the cookie is bogus —
+# but the HMAC check passed and the helper *was* invoked.
+```
