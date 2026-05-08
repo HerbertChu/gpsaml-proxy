@@ -97,17 +97,66 @@ tunnels with no cross-talk.
 
 → Cleared. Move to Gate 4.
 
-## Gate 4 — sshuttle through the bastion
+## Gate 4 — sshuttle through the bastion ⏳ PARTIAL (2026-05-08)
 
-**Question:** does a developer laptop running `sshuttle -r
-user@bastion 10.0.0.0/8 --dns` actually reach corp services through
-the bastion's tunnel?
+This gate has three independent layers; A and B are cleared, C is
+blocked on a problem that the gates above didn't anticipate.
 
-**How to test:** TBD — `poc/04-sshuttle-end-to-end.md`.
+### A. Provision helper
 
-**Decision:** if MTU / encapsulation issues bite, we'll have to
-choose between teaching the docs to set --max-mtu, switching to a
-WireGuard sidecar, or accepting the workaround.
+`bastion/bin/provision up <user> <cookie> <gateway> <fingerprint>`,
+running on a fresh AL2023 t3.medium with openconnect HEAD installed.
+
+**Result:** ✅ everything around openconnect works — useradd, ssh
+keypair generation, restricted authorized_keys, per-user
+sudoers entry validated by visudo, sequential subnet allocation in a
+flock'd JSON file, netns + veth + MASQUERADE NAT, and the actual
+`ip netns exec ns_<user> openconnect …` invocation. The only failure
+mode hit was `Cookie was rejected by server` — see C below — which
+is a layer above the helper.
+
+### B. SSH ForceCommand → netns
+
+`bastion/bin/enter-ns` invoked from authorized_keys
+`command="enter-ns ns_<user>"`, with sshd matching members of the
+`gpsaml-users` group to publickey-only / no-pty / no-forwarding.
+
+**Result:** ✅
+- `ssh hc1079@bastion "ip -br a"` returns ns_hc1079's interfaces.
+- `ssh hc1079@bastion "id"` returns `uid=1001(hc1079)` — enter-ns
+  drops privilege via `setpriv --reuid=… --regid=… --clear-groups`
+  *after* `ip netns exec` but *before* the client's shell runs, so
+  the SSH session has the user's authority despite traversing root.
+- `ssh hc1079@bastion "cat /etc/shadow"` → Permission denied.
+- `ssh hc1079@bastion "sudo ip netns exec ns_other_user ls"` → sudo
+  refuses (the per-user sudoers is scoped to `ns_<user>` only).
+- Plain `ssh hc1079@bastion` (no command) → `gpsaml-proxy:
+  interactive shells are not permitted`.
+
+### C. sshuttle end-to-end ⏳ blocked on cookie supply
+
+**Blocker:** the GP `authcookie` extracted from a laptop run of
+gpsaml is a one-shot — by the time we hand it to the bastion, the
+laptop's openconnect has already consumed it on `getconfig.esp` and
+the gateway returns "Cookie was rejected by server". Bastion can
+*almost* establish the tunnel — TLS handshake, prelogin, server cert
+fingerprint match all pass; only the final session bring-up fails.
+
+The architecture demands a way for the cookie to land at the bastion
+**without** the laptop's openconnect having seen it first. Options
+ranked by intrusiveness:
+
+1. Add a `--bastion-mode` to the gpsaml client that walks the SAML
+   handshake to the point of obtaining `authcookie` and then POSTs
+   it to the bastion instead of spawning a local openconnect. This
+   is also what Gate 5 needs anyway, so doing it here unblocks both.
+2. Run the client through a stub openconnect that captures `--cookie=…`
+   and exits cleanly. Crude but unblocks an isolated Phase-C test.
+3. Genuine server-side SAML middleman (rejected earlier — would
+   require IT to register the bastion as its own SP).
+
+Decision: do (1) as Gate 5 work, then come back to this gate with a
+real fresh authcookie.
 
 ## Gate 5 — automation
 
