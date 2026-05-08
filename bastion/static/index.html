@@ -12,21 +12,21 @@
   />
   <style>
     :root {
-      --bg: #0d0d0d;
-      --bg-deep: #050505;
-      --panel: #141311;
-      --panel-light: #1c1a16;
-      --border: #2a2722;
-      --border-strong: #3a352d;
+      --bg: #1d1b17;          /* warm dark, not pure black */
+      --bg-deep: #161410;
+      --panel: #26231e;
+      --panel-light: #2f2c25;
+      --border: #3b362d;
+      --border-strong: #4d473b;
       --text: #f5f0e1;
-      --text-dim: #9a9286;
-      --text-faint: #5a544a;
-      --amber: #ffb000;
-      --amber-deep: #c08800;
-      --amber-glow: rgba(255, 176, 0, 0.32);
-      --green: #6ea84f;
-      --green-glow: rgba(110, 168, 79, 0.45);
-      --red: #ff4d4d;
+      --text-dim: #b8ad99;
+      --text-faint: #6f6a5e;
+      --amber: #ffb74d;        /* slightly desaturated for the lighter bg */
+      --amber-deep: #d18b1f;
+      --amber-glow: rgba(255, 183, 77, 0.28);
+      --green: #8cbb66;
+      --green-glow: rgba(140, 187, 102, 0.4);
+      --red: #ff6b6b;
 
       --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
       --font-sans: "IBM Plex Sans", -apple-system, system-ui, sans-serif;
@@ -46,31 +46,31 @@
 
     /* ─── atmosphere ────────────────────────────────────────── */
     body::before {
-      /* soft amber bloom in the upper-left, like a CRT phosphor */
+      /* soft amber bloom, gentler now that the bg itself is lighter */
       content: "";
       position: fixed; inset: 0;
       background:
-        radial-gradient(circle at 12% 18%, rgba(255, 176, 0, 0.08), transparent 55%),
-        radial-gradient(circle at 88% 92%, rgba(110, 168, 79, 0.04), transparent 50%);
+        radial-gradient(circle at 14% 18%, rgba(255, 183, 77, 0.06), transparent 55%),
+        radial-gradient(circle at 88% 92%, rgba(140, 187, 102, 0.03), transparent 50%);
       pointer-events: none;
       z-index: 0;
     }
     body::after {
-      /* scanlines, very subtle */
+      /* scanlines, only barely there */
       content: "";
       position: fixed; inset: 0;
       background:
         repeating-linear-gradient(
           to bottom,
-          rgba(255, 255, 255, 0.02) 0px,
-          rgba(255, 255, 255, 0.02) 1px,
+          rgba(255, 255, 255, 0.014) 0px,
+          rgba(255, 255, 255, 0.014) 1px,
           transparent 1px,
-          transparent 3px
+          transparent 4px
         );
       pointer-events: none;
       z-index: 1;
       mix-blend-mode: overlay;
-      opacity: 0.7;
+      opacity: 0.4;
     }
 
     main { position: relative; z-index: 2; }
