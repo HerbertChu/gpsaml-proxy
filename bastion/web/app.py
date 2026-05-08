@@ -92,8 +92,23 @@ def connect():
     if res.returncode == 3:
         return jsonify({"error": "bastion at capacity"}), 503
     if res.returncode != 0:
+        # Stash the full stderr so SSM-only debugging is possible even
+        # when the client truncates the response body.
+        try:
+            log_path = pathlib.Path("/var/log/gpsaml-proxy/provision.log")
+            with log_path.open("a") as fh:
+                fh.write(
+                    f"\n===== {user} {os.environ.get('HOSTNAME', '?')} "
+                    f"rc={res.returncode} =====\n"
+                )
+                fh.write(res.stderr)
+                fh.write("\n----- stdout -----\n")
+                fh.write(res.stdout)
+                fh.write("\n")
+        except Exception:
+            pass
         return (
-            jsonify({"error": "provision failed", "detail": res.stderr.strip()[:1000]}),
+            jsonify({"error": "provision failed", "detail": res.stderr.strip()[:4000]}),
             500,
         )
 
