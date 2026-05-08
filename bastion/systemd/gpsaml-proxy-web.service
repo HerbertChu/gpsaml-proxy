@@ -32,7 +32,13 @@ RestartSec=3
 #     * gpw being unprivileged
 #     * sudoers limiting gpw to exactly /opt/gpsaml-proxy/bin/provision
 #     * provision validating its own inputs.
-PrivateTmp=true
+# - PrivateTmp= and any other mount-namespace isolation are also off:
+#   `ip netns add` bind-mounts /proc/self/ns/net onto /run/netns/<ns>,
+#   and that mount has to be visible to the host so sshd-spawned user
+#   sessions can later `ip netns exec` into it. With a private mount
+#   namespace the bind mount lives only inside the unit's view and
+#   every external attempt at `ip netns exec` returns "Invalid
+#   argument".
 
 [Install]
 WantedBy=multi-user.target
