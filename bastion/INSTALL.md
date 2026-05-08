@@ -61,7 +61,7 @@ install -d -m 750 -o root -g root /var/log/gpsaml-proxy
    /opt/gpsaml-proxy/bin/provision up alice \
        'authcookie=...&portal=...&user=alice&domain=...&...' \
        taiwan-vpn.example.com \
-       E311340EE7F798CAA59FA2ED30CE7377CCC64D19 \
+       <40-char SHA1 fingerprint of your gateway's TLS cert> \
      | tee /tmp/alice-key.pem
    ```
 

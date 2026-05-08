@@ -1,0 +1,10 @@
+{
+  "comment": "Optional fallback L4 forwards. Used only when the extension doesn't send a forwards array in /api/connect (older clients, manual curl, etc.). Each entry runs `ip netns exec ns_<user> socat TCP-LISTEN:<port>,fork TCP:<ip>:<port>` inside the user's netns. The forwarder is reachable from the bastion's default netns at <netns-veth-ip>:<port>; the laptop's ssh -L picks it up there. Replace these examples with whatever internal services you want one-shot reachable; modern clients should drive forwards from the popup UI instead.",
+  "forwards": [
+    {
+      "hostname": "git.example.com",
+      "ip": "10.0.0.1",
+      "port": 443
+    }
+  ]
+}

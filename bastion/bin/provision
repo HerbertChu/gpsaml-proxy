@@ -47,18 +47,35 @@ USERMOD = "/usr/sbin/usermod"
 GROUPADD = "/usr/sbin/groupadd"
 SSH_KEYGEN = "/usr/bin/ssh-keygen"
 VISUDO = "/usr/sbin/visudo"
+SOCAT = "/usr/bin/socat"
+FORWARDS_CONFIG = pathlib.Path("/etc/gpsaml-proxy/forwards.json")
 
 
 # ── small helpers ───────────────────────────────────────────────────
 _T0 = time.monotonic()
+LOG_PATH = pathlib.Path("/var/log/gpsaml-proxy/provision.log")
+_PID = os.getpid()
 
 
 def trace(msg: str) -> None:
-    """Timestamped stderr trace. Used to figure out which provision
-    phase is hanging when the web's subprocess.run() times us out — the
-    web logs our stderr verbatim into provision.log on rc!=0, and we
-    can also tail it on the box."""
-    print(f"[{time.monotonic() - _T0:6.2f}s] {msg}", file=sys.stderr, flush=True)
+    """Timestamped trace, written to BOTH stderr and a persistent log
+    file. Stderr alone gets lost when the web's subprocess.run hits its
+    TimeoutExpired before we finish — the captured-but-undelivered
+    stderr never reaches Flask's exception handler. Writing straight to
+    /var/log/gpsaml-proxy/provision.log means trace lines survive
+    regardless of how the parent disposes of us."""
+    line = f"[{time.monotonic() - _T0:6.2f}s pid={_PID}] {msg}\n"
+    try:
+        sys.stderr.write(line)
+        sys.stderr.flush()
+    except Exception:
+        pass
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a") as fh:
+            fh.write(line)
+    except Exception:
+        pass
 
 
 def run(*args, check=True, capture=False, env=None):
@@ -203,9 +220,18 @@ def write_authorized_keys(user: str, pub_key_line: str, ns: str):
     ssh_dir.mkdir(mode=0o700, exist_ok=True)
     shutil.chown(ssh_dir, user, GROUP)
 
+    # We want local port forwarding (`ssh -L`) to the user's netns
+    # veth IP. `restrict` implies `no-port-forwarding`, and
+    # `permitopen="*:*"` is not a real wildcard — sshd treats it
+    # as a literal hostname, so any -L channel gets
+    # "administratively prohibited". Drop `restrict` and list
+    # individual hardenings that don't touch forwarding.
+    #
+    # Security still holds: the ForceCommand pins the user's session
+    # into ns_<user>, the veth network only reaches the user's own
+    # tun0, and the laptop side authenticates with a one-shot key.
     options = (
-        'restrict,permitopen="*:*",no-pty,no-agent-forwarding,'
-        'no-X11-forwarding,no-user-rc,'
+        'no-pty,no-agent-forwarding,no-X11-forwarding,no-user-rc,'
         f'command="{ENTER_NS} {ns}"'
     )
     content = (
@@ -340,7 +366,25 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
     ]
 
     trace(f"spawn_openconnect: launching openconnect (gateway={gateway})")
-    proc = subprocess.Popen(cmd, env=env)
+    # CRITICAL: redirect stdin/stdout/stderr to /dev/null instead of
+    # inheriting from provision. openconnect --background daemonizes
+    # via fork; the daemon child inherits these fds. If they point to
+    # the pipe gunicorn's subprocess.run() set up to capture our
+    # stdout, the daemon keeps the pipe's write end open and gunicorn
+    # blocks in read() waiting for EOF — provision exits, daemon keeps
+    # fd alive, gunicorn finally trips its 300s timeout. With DEVNULL
+    # the daemon inherits closed/null fds and our stdout pipe closes
+    # cleanly when provision exits. (--syslog is enough for openconnect
+    # to log to journal anyway.)
+    proc = subprocess.Popen(
+        cmd,
+        env=env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        start_new_session=True,
+    )
 
     # Poll for either: tun device up inside the ns (success) OR the
     # openconnect parent exiting non-zero (auth fail, HIP segfault, …).
@@ -361,16 +405,20 @@ def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
             trace(
                 f"spawn_openconnect: still waiting "
                 f"(elapsed={int(time.time() - (deadline - 150))}s, "
-                f"pid_file={pid_file.exists()}, parent_alive={rc is None})"
+                f"pid_file={pid_file.exists()}, parent_rc={rc})"
             )
         if not pid_file.exists():
             continue
         link_show = subprocess.run(
             [IP, "-n", ns, "link", "show"],
             capture_output=True, text=True, check=False,
+            timeout=5,
         )
+        if link_show.returncode != 0:
+            trace(f"spawn_openconnect: ip link show rc={link_show.returncode} stderr={link_show.stderr!r}")
+            continue
         if "tun0" in link_show.stdout or "utun" in link_show.stdout:
-            trace("spawn_openconnect: tun0 up")
+            trace(f"spawn_openconnect: tun0 detected; pid_file_pid={pid_file.read_text().strip()}")
             return True
 
     trace("spawn_openconnect: deadline hit, no tun0; killing parent")
@@ -446,8 +494,127 @@ def cleanup_netns_resolvconf(ns: str):
         d.rmdir()
 
 
+# ── socat L4 forwarders ─────────────────────────────────────────────
+# For each entry in /etc/gpsaml-proxy/forwards.json we spawn a socat
+# inside the user's netns. Because socat lives in the netns, its
+# upstream connect() goes via tun0 (= via openconnect's VPN). The
+# laptop side reaches it through the host-visible veth IP.
+def load_forwards() -> list[dict]:
+    if not FORWARDS_CONFIG.exists():
+        return []
+    try:
+        data = json.loads(FORWARDS_CONFIG.read_text())
+        return list(data.get("forwards", []))
+    except (json.JSONDecodeError, OSError) as e:
+        trace(f"load_forwards: failed to parse {FORWARDS_CONFIG}: {e}")
+        return []
+
+
+def _socat_pidfile(user: str, port: int) -> pathlib.Path:
+    return RUNTIME_DIR / f"socat-{user}-{port}.pid"
+
+
+def resolve_in_netns(ns: str, hostname: str):
+    """Resolve hostname using the netns's resolv.conf (which points at
+    the corp DNS pushed by openconnect). Returns None on failure."""
+    try:
+        res = subprocess.run(
+            [IP, "netns", "exec", ns, "getent", "ahostsv4", hostname],
+            capture_output=True, text=True, check=False, timeout=8,
+        )
+        if res.returncode != 0:
+            return None
+        # First column of first line is the IP.
+        first = res.stdout.strip().split("\n")[0].split()
+        if not first:
+            return None
+        return first[0]
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return None
+
+
+def spawn_socats(user, ns, forwards_json):
+    """Spawn one socat per forward, in the user's netns.
+
+    forwards_json: JSON-encoded list of {hostname, port}. If None or
+    empty falls back to /etc/gpsaml-proxy/forwards.json. Each hostname
+    is resolved using corp DNS (via the netns's resolv.conf) — the
+    extension only sends hostnames so the bastion is the
+    trust-anchor for the IP.
+    """
+    if forwards_json:
+        try:
+            requested = json.loads(forwards_json)
+        except json.JSONDecodeError:
+            requested = []
+    else:
+        requested = load_forwards()
+
+    # If the request didn't specify any forwards, fall back to the
+    # static config (so admins can opt into a default).
+    if not requested:
+        requested = load_forwards()
+
+    started: list[dict] = []
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    for fwd in requested:
+        port = int(fwd["port"])
+        # IP can come pre-resolved (legacy forwards.json) or be
+        # resolved here from hostname (extension flow).
+        ip = fwd.get("ip")
+        if not ip:
+            ip = resolve_in_netns(ns, fwd["hostname"])
+            if not ip:
+                trace(f"spawn_socats: skipping {fwd['hostname']}: DNS resolve failed in netns")
+                continue
+        cmd = [
+            IP, "netns", "exec", ns,
+            SOCAT,
+            f"TCP-LISTEN:{port},fork,reuseaddr,bind=0.0.0.0",
+            f"TCP:{ip}:{port}",
+        ]
+        trace(f"spawn_socats: starting forward {fwd['hostname']} -> {ip}:{port}")
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        _socat_pidfile(user, port).write_text(str(proc.pid))
+        started.append({"hostname": fwd["hostname"], "ip": ip, "port": port, "pid": proc.pid})
+    return started
+
+
+def kill_socats(user: str):
+    """Kill all socat forwarders for this user. Pidfiles are
+    authoritative; pkill is a fallback in case the pidfile got out
+    of sync (subprocess timeouts, crashes)."""
+    for pf in RUNTIME_DIR.glob(f"socat-{user}-*.pid"):
+        try:
+            pid = int(pf.read_text().strip())
+            try:
+                os.kill(pid, 15)
+            except ProcessLookupError:
+                pass
+        except (ValueError, OSError):
+            pass
+        pf.unlink(missing_ok=True)
+    # Belt and suspenders: any socat we lost track of, find by argv.
+    try:
+        ns = ns_for(user)
+        subprocess.run(
+            ["pkill", "-f", f"netns exec {ns}.*socat"],
+            check=False, capture_output=True,
+        )
+    except FileNotFoundError:
+        pass
+
+
 # ── top-level commands ──────────────────────────────────────────────
-def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
+def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str,
+           forwards_json=None):
     trace(f"cmd_up: start user={user} gateway={gateway}")
     assert_user(user)
     ensure_group()
@@ -482,12 +649,26 @@ def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
         cmd_down(user)
         sys.exit("openconnect failed to bring tunnel up within deadline")
 
+    trace("cmd_up: spawn socat forwarders")
+    forwards = spawn_socats(user, ns, forwards_json)
+
     RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
     (RUNTIME_DIR / f"{user}.alive").touch()
 
-    trace("cmd_up: done, writing private key to stdout")
-    # Private key on stdout for the web to pick up. Web must NOT log it.
-    sys.stdout.write(priv_key)
+    trace("cmd_up: done, writing JSON envelope to stdout")
+    # JSON envelope: { "private_key": "...", "ns_ip": "...",
+    # "forwards": [{hostname, ip, port}, ...] }. Web parses this
+    # and feeds it into the .command builder; older "raw key on
+    # stdout" callers should be migrated.
+    envelope = {
+        "private_key": priv_key,
+        "ns_ip": ns_ip,
+        "forwards": [
+            {"hostname": f["hostname"], "ip": f["ip"], "port": int(f["port"])}
+            for f in forwards
+        ],
+    }
+    sys.stdout.write(json.dumps(envelope))
 
 
 def cmd_down(user: str):
@@ -495,8 +676,9 @@ def cmd_down(user: str):
     assert_user(user)
     ns = ns_for(user)
 
+    kill_socats(user)
     kill_openconnect(user)
-    trace("cmd_down: openconnect killed; tearing down netns/veth/nat")
+    trace("cmd_down: socat + openconnect killed; tearing down netns/veth/nat")
     cleanup_netns_resolvconf(ns)
     del_netns(ns)
     remove_veth(user)
@@ -540,6 +722,12 @@ def main():
     up.add_argument("cookie")
     up.add_argument("gateway")
     up.add_argument("fingerprint")
+    up.add_argument(
+        "forwards",
+        nargs="?",
+        default=None,
+        help="JSON-encoded list of {hostname, port} forwards",
+    )
 
     dn = sub.add_parser("down")
     dn.add_argument("user")
@@ -554,7 +742,7 @@ def main():
         sys.exit("provision must run as root")
 
     if args.cmd == "up":
-        cmd_up(args.user, args.cookie, args.gateway, args.fingerprint)
+        cmd_up(args.user, args.cookie, args.gateway, args.fingerprint, args.forwards)
     elif args.cmd == "down":
         cmd_down(args.user)
     elif args.cmd == "heartbeat":

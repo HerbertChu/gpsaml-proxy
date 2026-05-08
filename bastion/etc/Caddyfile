@@ -1,0 +1,34 @@
+# /etc/caddy/Caddyfile  — installed by deploy script.
+#
+# Caddy fronts gunicorn-on-127.0.0.1:8080 with auto-renewing Let's
+# Encrypt certs via ACME HTTP-01 (port 80 must be reachable from the
+# internet — open it in the SG before deploying). Caddy handles cert
+# storage in /var/lib/caddy and renews before expiry on its own; no
+# cron / certbot scheduler needed.
+
+{
+    email noreply@lightyearlabs.io
+    # Send Let's Encrypt expiry notifications to this address.
+    # Caddy will silently renew well before this fires.
+    # Pin to Let's Encrypt only — ZeroSSL kept getting stuck mid-
+    # challenge on this host and Caddy's auto-fallback chain ate
+    # several hours of debug time.
+    acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+gpsaml.lightyearlabs.io {
+    encode zstd gzip
+
+    # /healthz, /static, /api/*, /download/* — all served by gunicorn.
+    reverse_proxy 127.0.0.1:8080 {
+        # The .command download chunked-streams a binary the user
+        # double-clicks, so leave header_up untouched (we want
+        # Content-Disposition pass through unchanged).
+        flush_interval -1
+    }
+
+    log {
+        output file /var/log/caddy/gpsaml-access.log
+        format console
+    }
+}

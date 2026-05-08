@@ -36,4 +36,18 @@ case "$reason" in
     ;;
 esac
 
+# Clear DNS-related env vars before handing off to the standard
+# vpnc-script. The downstream script otherwise rewrites the HOST's
+# /etc/resolv.conf with corp DNS — which is unreachable from the
+# default ns (those servers live behind the in-netns openconnect
+# tunnel) and breaks every outbound DNS lookup on the bastion until
+# someone notices.
+#
+# We've already pushed the corp DNS into /etc/netns/$NETNS_NAME/
+# resolv.conf above, so consumers running inside the user's netns
+# still resolve corp names; the host stays on its DHCP-set DNS.
+unset INTERNAL_IP4_DNS
+unset INTERNAL_IP6_DNS
+unset CISCO_DEF_DOMAIN
+unset CISCO_BANNER
 exec /etc/vpnc/vpnc-script "$@"

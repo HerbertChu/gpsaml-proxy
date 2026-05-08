@@ -1,0 +1,44 @@
+[
+  {
+    "id": 1,
+    "priority": 10,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "User-Agent", "operation": "set", "value": "PAN GlobalProtect" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "/global-protect/",
+      "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame", "other"]
+    }
+  },
+  {
+    "id": 2,
+    "priority": 10,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "User-Agent", "operation": "set", "value": "PAN GlobalProtect" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "/ssl-vpn/",
+      "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame", "other"]
+    }
+  },
+  {
+    "id": 3,
+    "priority": 5,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "User-Agent", "operation": "set", "value": "PAN GlobalProtect" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "/getconfig.esp",
+      "resourceTypes": ["xmlhttprequest", "main_frame", "sub_frame", "other"]
+    }
+  }
+]

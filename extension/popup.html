@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>gpsaml-bastion</title>
+    <style>
+      :root {
+        --bg: #faf9f7;
+        --surface: #ffffff;
+        --border: #ece8e1;
+        --border-strong: #1a1a1a;
+        --text: #0e0e10;
+        --text-dim: #6b6660;
+        --text-faint: #a8a29a;
+        --orange: #f58025;
+        --orange-deep: #d66b14;
+        --orange-soft: rgba(245, 128, 37, 0.18);
+        --orange-glow: rgba(245, 128, 37, 0.32);
+        --alert: #d72638;
+        --alert-soft: rgba(215, 38, 56, 0.16);
+        --ok: #2e8b57;
+        --shadow: 0 1px 0 rgba(20, 16, 10, 0.04),
+          0 6px 16px rgba(20, 16, 10, 0.05);
+
+        --font-display: -apple-system, "SF Pro Display", system-ui, sans-serif;
+        --font-text: -apple-system, "SF Pro Text", system-ui, sans-serif;
+        --font-mono: ui-monospace, "SF Mono", Menlo, monospace;
+      }
+      * { box-sizing: border-box; }
+      html, body {
+        margin: 0; padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: var(--font-text);
+        font-size: 13px;
+        -webkit-font-smoothing: antialiased;
+        width: 100%;
+        min-width: 360px;
+      }
+      body { display: flex; flex-direction: column; min-height: 100vh; }
+
+      /* — status bar — */
+      .status-bar {
+        flex: none;
+        display: flex; align-items: center; gap: 8px;
+        height: 30px; padding: 0 14px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.04em;
+        color: var(--text-dim);
+      }
+      .status-bar .brand {
+        color: var(--text); font-weight: 600;
+        font-family: var(--font-display); font-size: 11px;
+        letter-spacing: 0.02em;
+      }
+      .status-bar .sep { color: var(--text-faint); }
+      .status-bar .step { color: var(--text-dim); }
+      .status-bar .spacer { flex: 1; }
+      .status-bar .indicator { display: flex; align-items: center; gap: 6px; }
+      .status-bar .led {
+        width: 6px; height: 6px; border-radius: 50%;
+        background: var(--orange);
+        box-shadow: 0 0 0 2px var(--orange-soft);
+      }
+      .status-bar.connected .led { background: var(--ok); box-shadow: 0 0 0 2px rgba(46, 139, 87, 0.18); }
+      .status-bar.error .led { background: var(--alert); box-shadow: 0 0 0 2px var(--alert-soft); }
+      .status-bar.busy .led { animation: blink-led 1.4s ease-in-out infinite; }
+      @keyframes blink-led { 0%, 100% { opacity: 1 } 50% { opacity: 0.35 } }
+
+      /* — main / steps — */
+      main { flex: 1; padding: 22px 20px 18px; display: flex; flex-direction: column; gap: 16px; }
+      .step { display: none; flex-direction: column; gap: 14px; }
+      .step.active { display: flex; }
+
+      .kicker {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.22em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+      }
+      h2 {
+        font-family: var(--font-display);
+        font-size: 18px;
+        font-weight: 600;
+        margin: 0;
+        letter-spacing: -0.01em;
+      }
+      .lede {
+        color: var(--text-dim); line-height: 1.5; margin: 0;
+        font-size: 12px;
+      }
+
+      input[type=text], input[type=number], select {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 9px 11px;
+        border-radius: 6px;
+        font-size: 13px;
+        font-family: inherit;
+        width: 100%;
+        transition: border 0.12s, box-shadow 0.12s;
+      }
+      input:focus, select:focus {
+        outline: none;
+        border-color: var(--orange);
+        box-shadow: 0 0 0 3px var(--orange-soft);
+      }
+      label { font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--text-dim); display: block; margin-bottom: 5px; }
+
+      .row { display: flex; gap: 6px; align-items: center; }
+      .row > input, .row > select { flex: 1; }
+
+      /* — gpsaml-style "stamped" buttons — */
+      button.primary, button.destructive, button.ghost {
+        font-family: var(--font-display);
+        font-size: 12px;
+        font-weight: 700;
+        letter-spacing: 0.05em;
+        text-transform: uppercase;
+        border-radius: 6px;
+        padding: 10px 18px;
+        cursor: pointer;
+        transition: transform 0.08s ease, background 0.15s ease, box-shadow 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+      }
+      /* primary: black-on-white, hovers to orange */
+      button.primary {
+        background: var(--text);
+        color: var(--surface);
+        border: 1.5px solid var(--text);
+        box-shadow: 0 2px 0 var(--text);
+      }
+      button.primary:hover {
+        background: var(--orange);
+        border-color: var(--orange);
+        box-shadow: 0 2px 0 var(--orange-deep);
+      }
+      button.primary:active {
+        transform: translateY(2px);
+        box-shadow: 0 0 0 var(--text);
+      }
+      button.primary:disabled {
+        opacity: 0.35; cursor: not-allowed; pointer-events: none;
+      }
+      /* destructive (disconnect): red border, white bg, hovers solid */
+      button.destructive {
+        background: var(--surface);
+        color: var(--alert);
+        border: 1.5px solid var(--alert);
+        box-shadow: 0 2px 0 var(--alert);
+      }
+      button.destructive:hover {
+        background: var(--alert);
+        color: var(--surface);
+        box-shadow: 0 2px 0 #9c1a26;
+      }
+      button.destructive:active {
+        transform: translateY(2px);
+        box-shadow: 0 0 0 var(--alert);
+      }
+      /* ghost: outlined neutral, used for "Add" / "Back" */
+      button.ghost {
+        background: var(--surface);
+        color: var(--text);
+        border: 1.5px solid var(--text);
+        box-shadow: 0 2px 0 var(--text);
+        padding: 8px 14px;
+        font-size: 11px;
+      }
+      button.ghost:hover {
+        background: var(--text);
+        color: var(--surface);
+      }
+      button.ghost:active {
+        transform: translateY(2px);
+        box-shadow: 0 0 0 var(--text);
+      }
+      /* tiny "×" remove button on forward rows — tightly destructive */
+      button.danger {
+        background: transparent;
+        color: var(--alert);
+        border: none;
+        padding: 4px 8px;
+        font-size: 14px;
+        font-family: var(--font-mono);
+        cursor: pointer;
+        border-radius: 4px;
+        line-height: 1;
+      }
+      button.danger:hover { background: var(--alert-soft); }
+
+      .forwards { border: 1px solid var(--border); border-radius: 6px; background: var(--surface); }
+      .forward {
+        display: flex; gap: 8px; align-items: center;
+        padding: 8px 10px;
+        border-bottom: 1px solid var(--border);
+        font-size: 12px;
+      }
+      .forward:last-child { border-bottom: none; }
+      .forward .name { flex: 1; color: var(--text); }
+      .forward .port { color: var(--text-dim); font-family: var(--font-mono); }
+
+      .add-forward { padding: 8px 10px; display: flex; gap: 6px; }
+      .add-forward input { padding: 6px 8px; font-size: 12px; }
+
+      details {
+        font-size: 12px;
+        color: var(--text-dim);
+        border-top: 1px solid var(--border);
+        padding-top: 10px;
+      }
+      details > summary {
+        cursor: pointer;
+        font-family: var(--font-mono);
+        font-size: 10px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        list-style: none;
+      }
+      details > summary::-webkit-details-marker { display: none; }
+      details > summary::before { content: "▸ "; color: var(--text-faint); }
+      details[open] > summary::before { content: "▾ "; }
+
+      pre.cmd {
+        background: var(--text);
+        color: var(--orange);
+        font-family: var(--font-mono);
+        font-size: 11px;
+        padding: 10px 12px;
+        border-radius: 6px;
+        white-space: pre-wrap;
+        word-break: break-all;
+        max-height: 130px;
+        overflow-y: auto;
+        margin: 0;
+      }
+      .cmd-wrap {
+        position: relative;
+        margin: 8px 0;
+      }
+      .cmd-wrap .copy-btn {
+        position: absolute;
+        top: 6px; right: 6px;
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        background: var(--surface);
+        color: var(--text);
+        border: 1px solid var(--orange);
+        border-radius: 3px;
+        padding: 3px 8px;
+        cursor: pointer;
+        opacity: 0.85;
+        transition: background 0.1s, color 0.1s;
+        z-index: 1;
+      }
+      .cmd-wrap .copy-btn:hover { background: var(--orange); color: var(--surface); opacity: 1; }
+      .cmd-wrap .copy-btn.copied {
+        background: var(--ok); color: var(--surface); border-color: var(--ok);
+      }
+      .callout {
+        background: var(--orange-soft);
+        border-left: 3px solid var(--orange);
+        padding: 10px 12px;
+        border-radius: 4px;
+        font-size: 11px;
+        line-height: 1.5;
+        color: var(--text);
+        margin: 0 0 8px;
+      }
+      .callout strong {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--orange-deep);
+        display: block;
+        margin-bottom: 4px;
+      }
+
+      /* — sonar pulse with bulldog (matches gpsaml) — */
+      .pulse-wrap { display: flex; justify-content: center; padding: 12px 0 6px; }
+      .pulse {
+        position: relative; width: 130px; height: 130px;
+        display: flex; align-items: center; justify-content: center;
+      }
+      .pulse .ring {
+        position: absolute;
+        width: 60px; height: 60px;
+        border-radius: 50%;
+        border: 1.5px solid var(--orange);
+        top: 50%; left: 50%;
+        transform: translate(-50%, -50%);
+        animation: sonar 2.6s ease-out infinite;
+        opacity: 0;
+      }
+      .pulse .ring.r1 { animation-delay: 0s; }
+      .pulse .ring.r2 { animation-delay: 0.65s; }
+      .pulse .ring.r3 { animation-delay: 1.3s; }
+      @keyframes sonar {
+        0%   { width: 60px; height: 60px; opacity: 0.7; }
+        85%  { opacity: 0; }
+        100% { width: 128px; height: 128px; opacity: 0; }
+      }
+      .pup-mark {
+        position: relative; z-index: 2;
+        width: 64px; height: 64px;
+        display: flex; align-items: center; justify-content: center;
+        background: var(--orange);
+        border-radius: 50%;
+        box-shadow: 0 6px 20px var(--orange-glow), 0 0 0 4px var(--surface);
+        animation: bob 2.6s ease-in-out infinite;
+      }
+      .pup-mark svg { width: 40px; height: 40px; display: block; }
+      @keyframes bob {
+        0%, 100% { transform: translateY(0); }
+        50%      { transform: translateY(-2px); }
+      }
+
+      /* ── ARPA NOC channel monitor ─────────────────────────────
+       * Two stacked schematic channels with teletype hex streams,
+       * an orange scanner sweeping the wire, phase odometer, and a
+       * frame/elapsed counter at the bottom. Pure CSS for motion;
+       * popup.js ticks the counters.
+       */
+      .working-anim {
+        margin: 22px 0 6px;
+        display: flex; flex-direction: column;
+        gap: 14px;
+        font-family: var(--font-mono);
+      }
+
+      /* — channels — */
+      .channel {
+        display: flex; align-items: stretch; gap: 0;
+        height: 32px;
+      }
+      .ch-node {
+        flex: none;
+        display: flex; align-items: center;
+        font-size: 9px;
+        letter-spacing: 0.16em;
+        color: var(--text);
+        padding: 0 9px;
+        background: var(--surface);
+        border: 1.5px solid var(--text);
+        border-radius: 3px;
+        box-shadow: 0 2px 0 var(--text);
+        white-space: nowrap;
+        z-index: 2;
+      }
+      .ch-node .bk { color: var(--orange-deep); }
+
+      .wire {
+        flex: 1;
+        position: relative;
+        margin: 0 -2px;
+        overflow: hidden;
+        background:
+          linear-gradient(to bottom,
+            transparent 0,
+            transparent calc(50% - 1px),
+            var(--text) calc(50% - 1px),
+            var(--text) calc(50% + 1px),
+            transparent calc(50% + 1px),
+            transparent 100%);
+        /* fade the ends so chars don't "pop" */
+        -webkit-mask-image: linear-gradient(to right,
+          transparent 0%, black 12%, black 88%, transparent 100%);
+                mask-image: linear-gradient(to right,
+          transparent 0%, black 12%, black 88%, transparent 100%);
+      }
+
+      .wire-hex {
+        position: absolute;
+        top: 50%;
+        transform: translateY(-50%);
+        white-space: nowrap;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        line-height: 1;
+        color: var(--text-faint);
+        letter-spacing: 0.04em;
+        will-change: transform;
+        animation: hex-flow 5s linear infinite;
+      }
+      .channel.rev .wire-hex { animation-direction: reverse; }
+      @keyframes hex-flow {
+        from { transform: translate(-50%, -50%); }
+        to   { transform: translate(0, -50%); }
+      }
+
+      /* orange "scanner" sweep — picks out a moving slice of the wire
+       * and brightens it. uses a separate layer so the scrolling hex
+       * stays cheap. */
+      .wire::after {
+        content: "";
+        position: absolute;
+        top: 0; bottom: 0;
+        width: 32%;
+        background: linear-gradient(
+          90deg,
+          transparent 0%,
+          var(--orange-soft) 30%,
+          var(--orange-glow) 50%,
+          var(--orange-soft) 70%,
+          transparent 100%
+        );
+        mix-blend-mode: multiply;
+        animation: scan 2.4s ease-in-out infinite;
+        pointer-events: none;
+      }
+      .channel.rev .wire::after { animation-direction: reverse; }
+      @keyframes scan {
+        0%, 100% { transform: translateX(-30%); opacity: 0.55; }
+        50%      { transform: translateX(220%); opacity: 1; }
+      }
+
+      /* — phase odometer — */
+      .phases {
+        display: flex; align-items: center; gap: 6px;
+        padding: 8px 0 0;
+        flex-wrap: wrap;
+        justify-content: space-between;
+      }
+      .phase {
+        position: relative;
+        font-size: 9px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--text-faint);
+        padding: 5px 8px;
+        border: 1.5px solid var(--border);
+        border-radius: 3px;
+        background: var(--surface);
+        transition: color 0.4s, border-color 0.4s, box-shadow 0.4s;
+      }
+      .phase.active {
+        color: var(--text);
+        border-color: var(--orange);
+        box-shadow: 0 0 0 2px var(--orange-soft), 0 2px 0 var(--orange);
+      }
+      .phase.done {
+        color: var(--text-dim);
+        border-color: var(--text-dim);
+      }
+      .phase::before {
+        content: "›";
+        margin-right: 4px;
+        color: var(--text-faint);
+      }
+      .phase.active::before { color: var(--orange); }
+      .phase-sep {
+        flex: 1; height: 1.5px;
+        background-image: linear-gradient(to right,
+          var(--border) 0, var(--border) 50%, transparent 50%);
+        background-size: 4px 1.5px;
+        background-repeat: repeat-x;
+      }
+
+      /* — counter strip — */
+      .counter {
+        display: flex; align-items: baseline;
+        gap: 8px;
+        padding: 10px 12px;
+        background: var(--text);
+        color: var(--orange);
+        border-radius: 3px;
+        font-family: var(--font-mono);
+        font-size: 11px;
+        letter-spacing: 0.06em;
+        margin-top: 4px;
+      }
+      .counter .lab {
+        color: var(--text-faint);
+        font-size: 9px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+      }
+      .counter .val {
+        font-variant-numeric: tabular-nums;
+        font-weight: 700;
+      }
+      .counter .pipe { color: var(--text-faint); }
+      .counter .blink {
+        animation: cur-blink 0.9s steps(1) infinite;
+      }
+      @keyframes cur-blink { 50% { opacity: 0; } }
+
+      .gw-list {
+        display: flex; flex-direction: column; gap: 0;
+        border: 1px solid var(--border);
+        border-radius: 6px; background: var(--surface);
+        max-height: 200px; overflow-y: auto;
+      }
+      .gw-item {
+        padding: 10px 12px;
+        font-size: 13px;
+        cursor: pointer;
+        border-bottom: 1px solid var(--border);
+        display: flex; justify-content: space-between; align-items: center;
+      }
+      .gw-item:last-child { border-bottom: none; }
+      .gw-item:hover { background: var(--orange-soft); }
+      .gw-item.selected {
+        background: var(--orange-soft);
+        font-weight: 600;
+      }
+      .gw-item .badge {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.12em;
+        text-transform: uppercase;
+        color: var(--orange-deep);
+      }
+
+      .err { color: var(--alert); font-size: 12px; line-height: 1.45; }
+    </style>
+  </head>
+  <body>
+    <div class="status-bar busy" id="bar">
+      <span class="brand">gpsaml-bastion</span>
+      <span class="sep">/</span>
+      <span class="step" id="bar-step">step 1 / 3 — portal</span>
+      <span class="spacer"></span>
+      <span class="indicator"><span class="led"></span></span>
+    </div>
+
+    <main>
+      <!-- ── step 1: portal ────────────────────────────────────── -->
+      <section class="step active" id="step-portal">
+        <span class="kicker">Step 1 — Portal</span>
+        <h2>Sign in to your VPN</h2>
+        <p class="lede">Enter your GlobalProtect portal hostname. The extension drives the SAML, captures the cookie, and hands it to the bastion.</p>
+
+        <div>
+          <label for="portal">Portal hostname</label>
+          <input id="portal" type="text" placeholder="vpn.example.com" autocomplete="off" />
+        </div>
+
+        <button class="primary" id="connect">Authenticate via SAML →</button>
+
+        <details>
+          <summary>Forwards (<span id="fwd-count">0</span>)</summary>
+          <div id="forwards" class="forwards" style="margin-top: 10px;"></div>
+          <div class="add-forward">
+            <input id="new-host" type="text" placeholder="hostname" />
+            <input id="new-port" type="number" placeholder="port" style="max-width: 70px;" />
+            <button class="ghost" id="add">Add</button>
+          </div>
+        </details>
+      </section>
+
+      <!-- ── step 2: gateway selection ─────────────────────────── -->
+      <section class="step" id="step-gateway">
+        <span class="kicker">Step 2 — Gateway</span>
+        <h2>Pick a gateway</h2>
+        <p class="lede">Your portal returned multiple gateways. Picking one closer to you reduces latency.</p>
+
+        <div class="gw-list" id="gw-list"></div>
+
+        <div class="row">
+          <button class="ghost" id="gw-back">← Back</button>
+          <button class="primary" id="gw-confirm" style="flex:1;">Continue</button>
+        </div>
+      </section>
+
+      <!-- ── step 3: progress ──────────────────────────────────── -->
+      <section class="step" id="step-progress">
+        <span class="kicker" id="prog-kicker">Working</span>
+        <h2 id="prog-title">Authenticating…</h2>
+        <p class="lede" id="prog-detail">Hand off to the SAML window — sign in there, the tab will close itself when done.</p>
+
+        <div class="working-anim">
+          <!-- channel A: browser ⇄ bastion (SAML / cookie / API) -->
+          <div class="channel">
+            <div class="ch-node"><span class="bk">[</span>browser<span class="bk">]</span></div>
+            <div class="wire">
+              <div class="wire-hex" id="hex-up"></div>
+            </div>
+            <div class="ch-node"><span class="bk">[</span>bastion<span class="bk">]</span></div>
+          </div>
+
+          <!-- channel B: bastion ⇄ corp (openconnect / netns / socat) -->
+          <div class="channel rev">
+            <div class="ch-node"><span class="bk">[</span>bastion<span class="bk">]</span></div>
+            <div class="wire">
+              <div class="wire-hex" id="hex-dn"></div>
+            </div>
+            <div class="ch-node"><span class="bk">[</span>corp::ns<span class="bk">]</span></div>
+          </div>
+
+          <!-- phase odometer — popup.js advances .active position -->
+          <div class="phases" id="phases">
+            <div class="phase active" data-phase="saml">SAML</div>
+            <div class="phase" data-phase="cfg">CONFIG</div>
+            <div class="phase" data-phase="auth">AUTH</div>
+            <div class="phase" data-phase="hip">HIP</div>
+            <div class="phase" data-phase="tun">TUNNEL</div>
+            <div class="phase" data-phase="fwd">FORWARDS</div>
+          </div>
+
+          <!-- frame + elapsed counter — popup.js ticks 50ms -->
+          <div class="counter">
+            <span class="lab">frames</span>
+            <span class="val" id="ctr-frames">00000</span>
+            <span class="pipe">│</span>
+            <span class="lab">elapsed</span>
+            <span class="val" id="ctr-elapsed">00:00.00</span>
+            <span class="pipe">│</span>
+            <span class="blink">▮</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ── step 4: connected ─────────────────────────────────── -->
+      <section class="step" id="step-connected">
+        <div class="pulse-wrap">
+          <div class="pulse">
+            <span class="ring r1"></span>
+            <span class="ring r2"></span>
+            <span class="ring r3"></span>
+            <div class="pup-mark" aria-hidden="true">
+              <!-- Stylized bulldog face SVG (mirrors gpsaml) -->
+              <svg viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg">
+                <path fill="#FFFFFF" d="M 22 22 Q 18 14, 30 16 Q 32 28, 28 32 Z"/>
+                <path fill="#FFFFFF" d="M 78 22 Q 82 14, 70 16 Q 68 28, 72 32 Z"/>
+                <ellipse fill="#FFFFFF" cx="50" cy="46" rx="32" ry="26"/>
+                <path fill="#FFFFFF" d="M 18 54 Q 14 76, 36 80 Q 50 82, 64 80 Q 86 76, 82 54 Q 76 64, 50 66 Q 24 64, 18 54 Z"/>
+                <ellipse fill="#0E0E10" cx="36" cy="42" rx="3.2" ry="4"/>
+                <ellipse fill="#0E0E10" cx="64" cy="42" rx="3.2" ry="4"/>
+                <circle fill="#FFFFFF" cx="37" cy="41" r="1"/>
+                <circle fill="#FFFFFF" cx="65" cy="41" r="1"/>
+                <path fill="#0E0E10" d="M 44 54 Q 50 50, 56 54 Q 55 60, 50 62 Q 45 60, 44 54 Z"/>
+                <rect fill="#FFFFFF" x="46" y="68" width="2" height="3" rx="0.5"/>
+                <rect fill="#FFFFFF" x="52" y="68" width="2" height="3" rx="0.5"/>
+              </svg>
+            </div>
+          </div>
+        </div>
+        <h2 style="text-align:center;">Connected</h2>
+        <p class="lede" style="text-align:center;">via <span id="conn-gw" style="color:var(--text);font-family:var(--font-mono);"></span></p>
+
+        <div class="callout">
+          <strong>Why /etc/hosts</strong>
+          The browser checks the cert against whatever name you typed. If you
+          point at <code>localhost:8443</code> the cert is for
+          <code>git.example.com</code> — mismatch, page won't load. With
+          a /etc/hosts line your URL stays the corp hostname, the SSH tunnel
+          intercepts it on the way out, and the cert validates cleanly.
+        </div>
+
+        <div>
+          <label>1. Tighten the key</label>
+          <div class="cmd-wrap">
+            <button class="copy-btn" data-target="chmod-cmd">copy</button>
+            <pre class="cmd" id="chmod-cmd">chmod 600 ~/Downloads/gpsaml-bastion-id</pre>
+          </div>
+        </div>
+
+        <div id="hosts-block">
+          <label>2. Map the corp hostnames <span style="color:var(--orange-deep);font-weight:600;">(required for HTTPS)</span></label>
+          <div class="cmd-wrap">
+            <button class="copy-btn" data-target="hosts-cmd">copy</button>
+            <pre class="cmd" id="hosts-cmd"></pre>
+          </div>
+        </div>
+
+        <div>
+          <label>3. Open the tunnel</label>
+          <div class="cmd-wrap">
+            <button class="copy-btn" data-target="ssh-cmd">copy</button>
+            <pre class="cmd" id="ssh-cmd"></pre>
+          </div>
+        </div>
+
+        <div>
+          <label>4. Reach corp</label>
+          <div id="forward-table"></div>
+        </div>
+
+        <button class="destructive" id="disconnect" style="width:100%; margin-top:8px;">Disconnect</button>
+      </section>
+
+      <!-- ── step 5: error ─────────────────────────────────────── -->
+      <section class="step" id="step-error">
+        <span class="kicker" style="color:var(--alert);">Failed</span>
+        <h2>Couldn't connect</h2>
+        <p class="err" id="err-msg"></p>
+        <button class="primary" id="err-retry">← Try again</button>
+      </section>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>
