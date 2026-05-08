@@ -19,10 +19,18 @@ ExecStart=/opt/gpsaml-proxy/venv/bin/gunicorn \
     app:app
 Restart=on-failure
 RestartSec=3
-NoNewPrivileges=false       # gpw needs sudo, which requires setuid
-ProtectSystem=strict
-ReadWritePaths=/var/log/gpsaml-proxy /var/run/gpsaml-proxy
-ProtectHome=true
+
+# Sandboxing notes:
+# - NoNewPrivileges=false because gpw needs to call sudo (setuid).
+# - ProtectSystem= and ProtectHome= are intentionally NOT enabled:
+#   the provision helper this service shells out to writes to
+#   /var/lib/gpsaml-proxy, /etc/sudoers.d/, /etc/netns/, /home/<user>/.
+#   systemd applies its filesystem sandbox to the entire cgroup, so
+#   even sudo'd-to-root children inherit it and can't escape — the
+#   cleanest answer is to leave the FS open and rely on:
+#     * gpw being unprivileged
+#     * sudoers limiting gpw to exactly /opt/gpsaml-proxy/bin/provision
+#     * provision validating its own inputs.
 PrivateTmp=true
 
 [Install]
