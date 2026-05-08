@@ -99,3 +99,39 @@ install -d -m 750 -o root -g root /var/log/gpsaml-proxy
 If every step lands cleanly, Phase A is good. The next phase is
 hooking sshd's `ForceCommand` to the per-user namespace via
 `/opt/gpsaml-proxy/bin/enter-ns` and validating sshuttle end-to-end.
+
+## Phase B — sshd ForceCommand
+
+```sh
+install -m 755 -o root -g root \
+  bastion/bin/enter-ns                          /opt/gpsaml-proxy/bin/
+
+install -m 644 -o root -g root \
+  bastion/etc/sshd_config-gpsaml.conf           /etc/ssh/sshd_config.d/99-gpsaml.conf
+
+systemctl reload sshd
+```
+
+After `provision up` has put a user (and their authorized_keys + sudoers
+entry) on the host, you can validate the SSH integration loopback-style
+without poking holes in the bastion's security group:
+
+```sh
+# Generate a throwaway local key and overwrite hc1079's authorized_keys
+# so we can SSH in from the bastion itself.
+mkdir -p /tmp/test-key && ssh-keygen -t ed25519 -N '' -f /tmp/test-key/id -C test
+cat > /home/hc1079/.ssh/authorized_keys <<EOF
+restrict,permitopen="*:*",no-pty,no-agent-forwarding,no-X11-forwarding,no-user-rc,command="/opt/gpsaml-proxy/bin/enter-ns ns_hc1079" $(cat /tmp/test-key/id.pub)
+EOF
+chown hc1079:gpsaml-users /home/hc1079/.ssh/authorized_keys
+
+# Run a command — should land inside ns_hc1079.
+ssh -i /tmp/test-key/id -o StrictHostKeyChecking=no hc1079@localhost "ip -br a"
+
+# Asking for nothing (interactive shell) — should be refused by enter-ns.
+ssh -i /tmp/test-key/id -o StrictHostKeyChecking=no hc1079@localhost
+```
+
+The first command should print the namespace's `lo` and `vp_<user>`
+interfaces (and `tun0` once a tunnel is up). The second should return
+`gpsaml-proxy: interactive shells are not permitted`.
