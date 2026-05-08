@@ -1,0 +1,39 @@
+#!/bin/sh
+# Wrapper around the standard vpnc-script that puts the GP-pushed DNS
+# servers in /etc/netns/<NETNS_NAME>/resolv.conf instead of overwriting
+# the host-global /etc/resolv.conf.
+#
+# Linux's resolver looks for /etc/netns/<ns>/resolv.conf first when the
+# calling process is inside <ns>, so anything running via
+# `ip netns exec ns_alice ...` (including sshuttle's relay) sees the
+# corp DNS automatically.
+#
+# Routes / interface setup still go through the standard script, which
+# operates on the routing table of the namespace openconnect is in
+# (i.e. ns_<NETNS_NAME>) and so already does the right thing.
+
+set -e
+
+case "$reason" in
+  connect|reconnect|post-connect)
+    if [ -n "$INTERNAL_IP4_DNS" ] && [ -n "$NETNS_NAME" ]; then
+      install -d -m 755 "/etc/netns/$NETNS_NAME"
+      {
+        for dns in $INTERNAL_IP4_DNS; do
+          echo "nameserver $dns"
+        done
+        if [ -n "$CISCO_DEF_DOMAIN" ]; then
+          echo "search $CISCO_DEF_DOMAIN"
+        fi
+      } > "/etc/netns/$NETNS_NAME/resolv.conf"
+    fi
+    ;;
+  disconnect)
+    if [ -n "$NETNS_NAME" ]; then
+      rm -f "/etc/netns/$NETNS_NAME/resolv.conf"
+      rmdir "/etc/netns/$NETNS_NAME" 2>/dev/null || true
+    fi
+    ;;
+esac
+
+exec /etc/vpnc/vpnc-script "$@"

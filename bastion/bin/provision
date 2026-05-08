@@ -1,0 +1,456 @@
+#!/usr/bin/env python3
+"""
+gpsaml-proxy provision helper.
+
+Brings a per-user GlobalProtect tunnel up (or down) on the bastion. The
+web service invokes this with `sudo -n /opt/gpsaml-proxy/bin/provision
+<up|down|heartbeat> <user> [...]` per a NOPASSWD entry in
+/etc/sudoers.d/gpsaml-proxy.
+
+`up` writes the freshly-generated SSH private key to stdout. The web is
+expected to capture stdout, hand the key to the browser, and never
+persist it.
+"""
+
+import argparse
+import fcntl
+import json
+import os
+import pathlib
+import pwd
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+# ── config ──────────────────────────────────────────────────────────
+USER_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
+GROUP = "gpsaml-users"
+QUOTA = 250
+SUBNET_BASE = "10.200"  # /16 sliced into /30s under .{octet}.0/30
+STATE_DIR = pathlib.Path("/var/lib/gpsaml-proxy")
+RUNTIME_DIR = pathlib.Path("/var/run/gpsaml-proxy")
+SUDOERS_DIR = pathlib.Path("/etc/sudoers.d")
+NETNS_ETC = pathlib.Path("/etc/netns")
+HOME_BASE = pathlib.Path("/home")
+
+OPENCONNECT = "/usr/local/sbin/openconnect"
+HIPREPORT = "/usr/local/libexec/openconnect/hipreport.sh"
+VPNC_WRAPPER = "/opt/gpsaml-proxy/bin/vpnc-script-netns"
+ENTER_NS = "/opt/gpsaml-proxy/bin/enter-ns"
+IP = "/usr/sbin/ip"
+IPTABLES = "/usr/sbin/iptables"
+USERADD = "/usr/sbin/useradd"
+USERMOD = "/usr/sbin/usermod"
+GROUPADD = "/usr/sbin/groupadd"
+SSH_KEYGEN = "/usr/bin/ssh-keygen"
+VISUDO = "/usr/sbin/visudo"
+
+
+# ── small helpers ───────────────────────────────────────────────────
+def run(*args, check=True, capture=False, env=None):
+    kw = {"check": check, "env": env}
+    if capture:
+        kw.update(stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    return subprocess.run(list(args), **kw)
+
+
+def egress_iface() -> str:
+    out = subprocess.check_output([IP, "route", "show", "default"], text=True)
+    return out.split()[4]  # default via X dev <iface> ...
+
+
+def assert_user(user: str) -> None:
+    if not USER_RE.match(user):
+        sys.exit(f"bad username: {user!r}")
+
+
+def ns_for(user: str) -> str:
+    return f"ns_{user}"
+
+
+# ── subnet allocator ────────────────────────────────────────────────
+# Persists to /var/lib/gpsaml-proxy/subnet-map.json. Holds an exclusive
+# flock for the duration of read-modify-write.
+def _state_path() -> pathlib.Path:
+    return STATE_DIR / "subnet-map.json"
+
+
+def _with_state(fn):
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    p = _state_path()
+    p.touch(exist_ok=True)
+    with open(p, "r+") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            try:
+                state = json.loads(f.read() or '{"users":{},"free":[]}')
+            except json.JSONDecodeError:
+                state = {"users": {}, "free": []}
+            new_state, ret = fn(state)
+            if new_state is not None:
+                f.seek(0)
+                f.truncate()
+                f.write(json.dumps(new_state, indent=2, sort_keys=True))
+                f.flush()
+            return ret
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
+def acquire_subnet(user: str):
+    def go(state):
+        if user in state["users"]:
+            return None, state["users"][user]
+        if len(state["users"]) >= QUOTA:
+            sys.exit(3)  # convention: exit 3 == quota exhausted
+        if state["free"]:
+            state["free"].sort()
+            octet = state["free"].pop(0)
+        else:
+            used = set(state["users"].values()) | set(state["free"])
+            octet = next(o for o in range(2, 252) if o not in used)
+        state["users"][user] = octet
+        return state, octet
+
+    octet = _with_state(go)
+    return octet, f"{SUBNET_BASE}.{octet}.1", f"{SUBNET_BASE}.{octet}.2"
+
+
+def lookup_subnet(user: str):
+    return _with_state(lambda s: (None, s["users"].get(user)))
+
+
+def release_subnet(user: str):
+    def go(state):
+        if user not in state["users"]:
+            return None, None
+        octet = state["users"].pop(user)
+        if octet not in state["free"]:
+            state["free"].append(octet)
+        return state, octet
+
+    return _with_state(go)
+
+
+# ── group / user ────────────────────────────────────────────────────
+def ensure_group():
+    run(GROUPADD, "-r", "-f", GROUP, capture=True, check=False)
+
+
+def user_exists(user: str) -> bool:
+    try:
+        pwd.getpwnam(user)
+        return True
+    except KeyError:
+        return False
+
+
+def ensure_user(user: str):
+    if not user_exists(user):
+        run(USERADD, "-m", "-s", "/usr/sbin/nologin", "-g", GROUP, user)
+    else:
+        run(USERMOD, "-aG", GROUP, user, capture=True)
+
+
+# ── ssh keys / authorized_keys ──────────────────────────────────────
+def gen_keypair(user: str):
+    td = tempfile.mkdtemp(dir="/tmp")
+    try:
+        priv = pathlib.Path(td) / "id"
+        run(
+            SSH_KEYGEN,
+            "-t", "ed25519",
+            "-N", "",
+            "-C", f"gpsaml-proxy@{user}@{int(time.time())}",
+            "-f", str(priv),
+            "-q",
+        )
+        return priv.read_text(), priv.with_suffix(".pub").read_text().strip()
+    finally:
+        shutil.rmtree(td, ignore_errors=True)
+
+
+def write_authorized_keys(user: str, pub_key_line: str, ns: str):
+    home = HOME_BASE / user
+    ssh_dir = home / ".ssh"
+    ssh_dir.mkdir(mode=0o700, exist_ok=True)
+    shutil.chown(ssh_dir, user, user)
+
+    options = (
+        'restrict,permitopen="*:*",no-pty,no-agent-forwarding,'
+        'no-X11-forwarding,no-user-rc,'
+        f'command="{ENTER_NS} {ns}"'
+    )
+    content = (
+        f"# Generated by gpsaml-proxy at "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n"
+        f"{options} {pub_key_line}\n"
+    )
+    auth_keys = ssh_dir / "authorized_keys"
+    auth_keys.write_text(content)
+    auth_keys.chmod(0o600)
+    shutil.chown(auth_keys, user, user)
+
+
+def blank_authorized_keys(user: str):
+    auth_keys = HOME_BASE / user / ".ssh" / "authorized_keys"
+    if auth_keys.exists():
+        auth_keys.write_text("")
+
+
+# ── per-user sudoers ────────────────────────────────────────────────
+def write_sudoers(user: str, ns: str):
+    SUDOERS_DIR.mkdir(parents=True, exist_ok=True)
+    path = SUDOERS_DIR / f"gpsaml-user-{user}"
+    content = (
+        "# Auto-generated by gpsaml-proxy. Do not edit by hand.\n"
+        f"{user} ALL=(root) NOPASSWD: {IP} netns exec {ns} *\n"
+    )
+    tmp = SUDOERS_DIR / f".gpsaml-user-{user}.tmp"
+    tmp.write_text(content)
+    tmp.chmod(0o440)
+    res = run(VISUDO, "-cf", str(tmp), capture=True, check=False)
+    if res.returncode != 0:
+        tmp.unlink(missing_ok=True)
+        sys.exit(f"sudoers syntax check failed: {res.stderr}")
+    tmp.replace(path)
+
+
+def remove_sudoers(user: str):
+    (SUDOERS_DIR / f"gpsaml-user-{user}").unlink(missing_ok=True)
+
+
+# ── networking ──────────────────────────────────────────────────────
+def ensure_ip_forward():
+    pathlib.Path("/proc/sys/net/ipv4/ip_forward").write_text("1\n")
+
+
+def ensure_netns(ns: str):
+    out = subprocess.check_output([IP, "netns", "list"], text=True)
+    existing = {line.split()[0] for line in out.splitlines() if line.strip()}
+    if ns in existing:
+        return
+    run(IP, "netns", "add", ns)
+
+
+def del_netns(ns: str):
+    run(IP, "netns", "del", ns, check=False, capture=True)
+
+
+def setup_veth(user: str, ns: str, host_ip: str, ns_ip: str):
+    veth_h = f"veth_{user}"
+    veth_n = f"vp_{user}"
+    # Drop any stale leftover
+    run(IP, "link", "del", veth_h, check=False, capture=True)
+    run(IP, "link", "add", veth_h, "type", "veth", "peer", "name", veth_n,
+        "netns", ns)
+    run(IP, "addr", "replace", f"{host_ip}/30", "dev", veth_h)
+    run(IP, "link", "set", veth_h, "up")
+    run(IP, "-n", ns, "addr", "replace", f"{ns_ip}/30", "dev", veth_n)
+    run(IP, "-n", ns, "link", "set", veth_n, "up")
+    run(IP, "-n", ns, "link", "set", "lo", "up")
+    run(IP, "-n", ns, "route", "replace", "default", "via", host_ip)
+
+
+def remove_veth(user: str):
+    run(IP, "link", "del", f"veth_{user}", check=False, capture=True)
+
+
+def ensure_nat(octet: int):
+    cidr = f"{SUBNET_BASE}.{octet}.0/30"
+    egress = egress_iface()
+    chk = run(IPTABLES, "-t", "nat", "-C", "POSTROUTING",
+              "-s", cidr, "-o", egress, "-j", "MASQUERADE",
+              check=False, capture=True)
+    if chk.returncode != 0:
+        run(IPTABLES, "-t", "nat", "-A", "POSTROUTING",
+            "-s", cidr, "-o", egress, "-j", "MASQUERADE")
+
+
+def remove_nat(octet: int):
+    cidr = f"{SUBNET_BASE}.{octet}.0/30"
+    egress = egress_iface()
+    run(IPTABLES, "-t", "nat", "-D", "POSTROUTING",
+        "-s", cidr, "-o", egress, "-j", "MASQUERADE",
+        check=False, capture=True)
+
+
+# ── openconnect ─────────────────────────────────────────────────────
+def spawn_openconnect(user: str, ns: str, cookie: str, gateway: str,
+                     fingerprint: str) -> bool:
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    pid_file = RUNTIME_DIR / f"{user}.pid"
+    pid_file.unlink(missing_ok=True)
+
+    env = dict(os.environ)
+    env["NETNS_NAME"] = ns
+
+    cmd = [
+        IP, "netns", "exec", ns,
+        OPENCONNECT,
+        "--protocol=gp",
+        "-u", user,
+        "--os=linux",
+        "--useragent=PAN GlobalProtect",
+        f"--cookie={cookie}",
+        "--version-string=Ubuntu Linux",
+        "--servercert", fingerprint,
+        f"--csd-wrapper={HIPREPORT}",
+        f"--script={VPNC_WRAPPER}",
+        "--background",
+        f"--pid-file={pid_file}",
+        "--syslog",
+        gateway,
+    ]
+    run(*cmd, env=env)
+
+    # Poll briefly for pidfile + a tun device showing up inside the netns.
+    for _ in range(30):
+        time.sleep(0.5)
+        if not pid_file.exists():
+            continue
+        out = subprocess.run(
+            [IP, "-n", ns, "link", "show"], capture_output=True, text=True,
+        ).stdout
+        if "tun0" in out or "utun" in out:
+            return True
+    return False
+
+
+def kill_openconnect(user: str):
+    pid_file = RUNTIME_DIR / f"{user}.pid"
+    if not pid_file.exists():
+        return
+    try:
+        pid = int(pid_file.read_text().strip())
+    except (ValueError, FileNotFoundError):
+        return
+    try:
+        os.kill(pid, 15)  # SIGTERM
+        for _ in range(20):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.5)
+        else:
+            os.kill(pid, 9)  # SIGKILL fallback
+    except ProcessLookupError:
+        pass
+    pid_file.unlink(missing_ok=True)
+
+
+# ── per-netns resolv.conf cleanup ───────────────────────────────────
+def cleanup_netns_resolvconf(ns: str):
+    d = NETNS_ETC / ns
+    (d / "resolv.conf").unlink(missing_ok=True)
+    if d.exists() and not any(d.iterdir()):
+        d.rmdir()
+
+
+# ── top-level commands ──────────────────────────────────────────────
+def cmd_up(user: str, cookie: str, gateway: str, fingerprint: str):
+    assert_user(user)
+    ensure_group()
+    ensure_user(user)
+    octet, host_ip, ns_ip = acquire_subnet(user)
+    ns = ns_for(user)
+
+    ensure_ip_forward()
+    ensure_netns(ns)
+    setup_veth(user, ns, host_ip, ns_ip)
+    ensure_nat(octet)
+
+    priv_key, pub_key = gen_keypair(user)
+    write_authorized_keys(user, pub_key, ns)
+    write_sudoers(user, ns)
+
+    ok = spawn_openconnect(user, ns, cookie, gateway, fingerprint)
+    if not ok:
+        # tunnel didn't come up — best-effort rollback so a retry is clean
+        cmd_down(user)
+        sys.exit("openconnect failed to bring tunnel up within 15 s")
+
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    (RUNTIME_DIR / f"{user}.alive").touch()
+
+    # Private key on stdout for the web to pick up. Web must NOT log it.
+    sys.stdout.write(priv_key)
+
+
+def cmd_down(user: str):
+    assert_user(user)
+    ns = ns_for(user)
+
+    kill_openconnect(user)
+    cleanup_netns_resolvconf(ns)
+    del_netns(ns)
+    remove_veth(user)
+
+    octet = lookup_subnet(user)
+    if octet is not None:
+        remove_nat(octet)
+    release_subnet(user)
+
+    remove_sudoers(user)
+    blank_authorized_keys(user)
+
+    (RUNTIME_DIR / f"{user}.alive").unlink(missing_ok=True)
+
+
+def cmd_heartbeat(user: str):
+    assert_user(user)
+    p = RUNTIME_DIR / f"{user}.alive"
+    if not p.exists():
+        sys.exit(f"no active session for {user}")
+    p.touch()
+
+
+def cmd_list():
+    """Print active sessions (for the reaper / admin debugging)."""
+    if not RUNTIME_DIR.exists():
+        return
+    now = time.time()
+    for f in RUNTIME_DIR.glob("*.alive"):
+        user = f.stem
+        age = int(now - f.stat().st_mtime)
+        print(f"{user}\t{age}s")
+
+
+def main():
+    p = argparse.ArgumentParser()
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    up = sub.add_parser("up")
+    up.add_argument("user")
+    up.add_argument("cookie")
+    up.add_argument("gateway")
+    up.add_argument("fingerprint")
+
+    dn = sub.add_parser("down")
+    dn.add_argument("user")
+
+    hb = sub.add_parser("heartbeat")
+    hb.add_argument("user")
+
+    sub.add_parser("list")
+
+    args = p.parse_args()
+    if os.geteuid() != 0:
+        sys.exit("provision must run as root")
+
+    if args.cmd == "up":
+        cmd_up(args.user, args.cookie, args.gateway, args.fingerprint)
+    elif args.cmd == "down":
+        cmd_down(args.user)
+    elif args.cmd == "heartbeat":
+        cmd_heartbeat(args.user)
+    elif args.cmd == "list":
+        cmd_list()
+
+
+if __name__ == "__main__":
+    main()
