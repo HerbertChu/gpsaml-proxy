@@ -155,7 +155,16 @@ def ensure_user(user: str):
     # in authorized_keys + the per-user sudoers scope, not the shell.
     if not user_exists(user):
         run(USERADD, "-m", "-s", "/bin/bash", "-g", GROUP, user)
-    else:
+        return
+    # User exists. Skip usermod if they're already in GROUP — usermod
+    # refuses to modify a user with an active session, and we don't
+    # need to touch the group anyway in the steady-state reconnect path.
+    info = subprocess.run(
+        ["/usr/bin/id", "-nG", user],
+        capture_output=True, text=True, check=False,
+    )
+    groups = info.stdout.split() if info.returncode == 0 else []
+    if GROUP not in groups:
         run(USERMOD, "-aG", GROUP, user, capture=True)
 
 
