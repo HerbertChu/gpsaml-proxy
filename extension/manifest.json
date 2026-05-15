@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "gpsaml-bastion",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Walks PAN GlobalProtect SAML in the browser, hands the resulting authcookie to a gpsaml-bastion, downloads a one-shot .command for ssh -L corp access.",
   "permissions": [
     "webRequest",

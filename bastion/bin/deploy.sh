@@ -76,6 +76,8 @@ sudo install -d /var/log/gpsaml-proxy /var/log/caddy /etc/gpsaml-proxy /etc/cadd
 sudo install -m 0755 "$SRC/bastion/bin/provision"            "$REPO/bin/provision"
 sudo install -m 0755 "$SRC/bastion/bin/vpnc-script-netns"    "$REPO/bin/vpnc-script-netns"
 sudo install -m 0755 "$SRC/bastion/bin/enter-ns"             "$REPO/bin/enter-ns"
+sudo install -m 0755 "$SRC/bastion/bin/cloudflare-dns.sh"    "$REPO/bin/cloudflare-dns.sh"
+sudo install -m 0755 "$SRC/bastion/bin/dns-sync-on-boot.sh"  "$REPO/bin/dns-sync-on-boot.sh"
 sudo install -m 0644 "$SRC/bastion/web/app.py"               "$REPO/web/app.py"
 sudo install -m 0644 "$SRC/bastion/static/index.html"        "$REPO/static/index.html"
 
@@ -96,9 +98,11 @@ sudo install -m 0644 "$SRC/bastion/etc/Caddyfile" /etc/caddy/Caddyfile
 sudo install -m 0440 -o root -g root "$SRC/bastion/etc/sudoers-web.conf" \
     /etc/sudoers.d/gpsaml-proxy-web
 
-# systemd unit.
+# systemd units.
 sudo install -m 0644 "$SRC/bastion/systemd/gpsaml-proxy-web.service" \
     /etc/systemd/system/gpsaml-proxy-web.service
+sudo install -m 0644 "$SRC/bastion/systemd/gpsaml-dns-sync.service" \
+    /etc/systemd/system/gpsaml-dns-sync.service
 sudo systemctl daemon-reload
 
 # ── secret ────────────────────────────────────────────────────────
@@ -114,6 +118,9 @@ sudo systemctl enable --now gpsaml-proxy-web
 sudo systemctl restart gpsaml-proxy-web
 sudo systemctl enable --now caddy
 sudo systemctl reload caddy || sudo systemctl restart caddy
+# Boot-time DNS sync — enabled but not started inline (deploy.sh runs
+# its own cloudflare-dns.sh below; the oneshot fires on next boot).
+sudo systemctl enable gpsaml-dns-sync.service
 
 # ── DNS (via Cloudflare API) ──────────────────────────────────────
 # Token is loaded from AWS Secrets Manager by default (the bastion's

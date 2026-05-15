@@ -76,7 +76,7 @@ plain `ssh -L` port forwards.
 | `extension/background.js` | SAML capture (webRequest header sniff), full PAN GP protocol port (prelogin → getconfig → gateway login), bastion call, key download, persistent state, centered popup window. |
 | `extension/popup.html` / `popup.js` | Multi-step UI (portal → gateway → working → connected) styled to match gpsaml's cream + orange + stamped-button motif. |
 | `extension/rules.json` | declarativeNetRequest static rules — sets `User-Agent: PAN GlobalProtect` for `/global-protect/*` and `/ssl-vpn/*` (browser fetch can't set this header directly). |
-| `extension/config.js` | Generic placeholders. Fork + edit for your own deployment. |
+| `extension/config.js` | Default values shown the first time the popup opens. Real per-user values are stored in `chrome.storage.local` via the **Bastion config** panel; fork + edit this file only if you want to bake them into the unpacked extension. |
 | `docs/architecture.md` | Long-form design notes. |
 
 ## End-to-end flow
@@ -187,24 +187,33 @@ After it returns, `https://<your-domain>/healthz` should respond with
 
 ### Extension
 
-1. Browse to `https://<your-domain>/` and click **Download
-   extension.zip**, or clone this repo and use `extension/` directly.
-2. Edit `extension/config.js`:
-   - `BASTION` → your bastion's HTTPS URL.
-   - `BASTION_SECRET` → the value of `/etc/gpsaml-proxy/secret` on the
-     bastion (read it once and paste; don't commit your fork).
-   - `GATEWAY_FINGERPRINT` → your GP gateway's TLS cert fingerprint:
+1. Download the latest extension zip from
+   [Releases](https://github.com/HerbertChu/gpsaml-proxy/releases),
+   or clone this repo and use `extension/` directly.
+2. `chrome://extensions` → Developer mode → **Load unpacked** → pick
+   the `extension/` folder. Pin it.
+3. Click the extension icon. The first time, the popup will surface a
+   **Bastion config needed** banner — expand the **Bastion config**
+   panel and fill in:
+   - **Bastion URL** → your bastion's HTTPS URL (e.g.
+     `https://gpsaml.example.com`).
+   - **Shared secret** → the value of `/etc/gpsaml-proxy/secret` on
+     the bastion (`cat` it, paste here; lives only in `chrome.storage.local`).
+   - **Gateway SHA-1 fingerprint** → your GP gateway's TLS cert fingerprint:
      ```sh
      openssl s_client -connect <gw>:443 </dev/null \
        | openssl x509 -fingerprint -sha1 -noout \
        | tr -d ':' | cut -d= -f2
      ```
-   - `DEFAULT_FORWARDS` → whichever services you want one-shot
-     reachable.
-3. `chrome://extensions` → Developer mode → **Load unpacked** → pick
-   the folder.
-4. Pin the extension. Click the icon. Type your portal hostname in the
-   first step. Hit **Authenticate via SAML**.
+4. Click **Save**. The banner clears and **Authenticate via SAML**
+   unlocks.
+5. Optional: tweak the **Forwards** list (defaults shipped with the
+   extension). Type your portal hostname; click Authenticate.
+
+Power-user alternative: edit `extension/config.js` directly to bake
+defaults into the unpacked extension (useful for distributing a
+pre-configured fork to your team). Storage values from the UI always
+win over config.js.
 
 ### Per-user flow
 
@@ -218,8 +227,10 @@ the popup (the latter tears down the bastion-side state).
 
 - **The shared secret is the entire authn boundary** between the
   extension and the bastion. Treat it like a credential — rotate by
-  regenerating `/etc/gpsaml-proxy/secret` and updating
-  `BASTION_SECRET` in every fork of `extension/config.js`.
+  regenerating `/etc/gpsaml-proxy/secret` and re-entering the value
+  in each user's extension via the **Bastion config** panel (or
+  updating `BASTION_SECRET` for forks that bake defaults into
+  `extension/config.js`).
 - **The user's session inside the bastion is sandboxed** by:
   - sshd group-match: pubkey-only, no PTY, no agent / X11 / R / D
     forwarding (only `AllowTcpForwarding local`).

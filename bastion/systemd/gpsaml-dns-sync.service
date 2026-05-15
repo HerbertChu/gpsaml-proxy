@@ -1,0 +1,21 @@
+[Unit]
+Description=gpsaml-proxy Cloudflare DNS sync (run once at boot)
+Documentation=https://github.com/HerbertChu/gpsaml-proxy
+After=network-online.target
+Wants=network-online.target
+# Make sure DNS sync wins the race against Caddy's ACME challenge.
+Before=caddy.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+Environment=DOMAIN=gpsaml.lightyearlabs.io
+Environment=SM_ID=gpsaml/cloudflare-api-token
+ExecStart=/opt/gpsaml-proxy/bin/dns-sync-on-boot.sh
+# Best-effort: never block boot or fail the unit if Cloudflare / SM is
+# transiently unreachable — Caddy will keep retrying ACME with whatever
+# DNS resolves now.
+SuccessExitStatus=0 1
+
+[Install]
+WantedBy=multi-user.target

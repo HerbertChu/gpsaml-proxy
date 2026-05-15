@@ -9,24 +9,50 @@
 // This is functionally a port of gpsaml/src/endpoints.ts (TypeScript,
 // Electron) into MV3 service-worker JS. No Electron / no sshuttle.
 
-import { PORTAL as DEFAULT_PORTAL, GATEWAY_FINGERPRINT, BASTION, BASTION_SECRET, DEFAULT_FORWARDS } from "./config.js";
+import {
+  PORTAL as DEFAULT_PORTAL,
+  GATEWAY_FINGERPRINT as DEFAULT_GATEWAY_FINGERPRINT,
+  BASTION as DEFAULT_BASTION,
+  BASTION_SECRET as DEFAULT_BASTION_SECRET,
+  DEFAULT_FORWARDS,
+} from "./config.js";
 
-// Per-session resolved portal — populated from chrome.storage.local
-// in startLogin(), with fallback to the config default.
+// Runtime config — populated from chrome.storage.local on every SW
+// (re)start so values survive SW eviction. The Bastion config UI in
+// the popup writes to the same storage keys; storage.onChanged below
+// keeps these mutable globals in sync without a SW reload.
 let PORTAL = DEFAULT_PORTAL;
 let GATEWAY = DEFAULT_PORTAL;
-async function loadPortalFromStorage() {
-  const { portal } = await chrome.storage.local.get("portal");
-  if (portal) {
-    PORTAL = portal;
-    GATEWAY = portal; // single-host PAN setup; user can override later
+let GATEWAY_FINGERPRINT = DEFAULT_GATEWAY_FINGERPRINT;
+let BASTION = DEFAULT_BASTION;
+let BASTION_SECRET = DEFAULT_BASTION_SECRET;
+
+async function loadRuntimeConfig() {
+  const v = await chrome.storage.local.get([
+    "portal",
+    "bastion",
+    "bastionSecret",
+    "gatewayFingerprint",
+  ]);
+  if (v.portal) {
+    PORTAL = v.portal;
+    GATEWAY = v.portal; // single-host PAN setup; gateway picker can refine later
   }
+  if (v.bastion) BASTION = v.bastion;
+  if (v.bastionSecret) BASTION_SECRET = v.bastionSecret;
+  if (v.gatewayFingerprint) GATEWAY_FINGERPRINT = v.gatewayFingerprint;
 }
 
-// Run on every SW (re)start so PORTAL is always the user's saved value
-// — the webRequest listener filters on it and SW eviction would
-// otherwise reset PORTAL to the default.
-loadPortalFromStorage();
+loadRuntimeConfig();
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area !== "local") return;
+  if (
+    changes.portal || changes.bastion || changes.bastionSecret ||
+    changes.gatewayFingerprint
+  ) {
+    loadRuntimeConfig();
+  }
+});
 restoreState();
 
 // ── persistent UI window (instead of browserAction popup) ─────────
@@ -220,7 +246,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 async function startLogin() {
   if (state.busy) return;
   resetState();
-  await loadPortalFromStorage();
+  await loadRuntimeConfig();
   setState({ busy: true, text: `Asking portal ${PORTAL} for SAML request…` });
   const samlRequest = await portalPrelogin();
   setState({ text: "Opening SAML window — sign in…" });

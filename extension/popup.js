@@ -4,7 +4,20 @@
 // call, .command download) lives in background.js — popup just sends
 // intents and reflects state.
 
-import { DEFAULT_FORWARDS, PORTAL as DEFAULT_PORTAL } from "./config.js";
+import {
+  DEFAULT_FORWARDS,
+  PORTAL as DEFAULT_PORTAL,
+  BASTION as DEFAULT_BASTION,
+  BASTION_SECRET as DEFAULT_BASTION_SECRET,
+  GATEWAY_FINGERPRINT as DEFAULT_GATEWAY_FINGERPRINT,
+} from "./config.js";
+
+// Placeholders shipped in config.js — if the storage value still
+// equals one of these we treat it as "not configured" so the connect
+// button is gated and the banner shows. Generated SHA-1 fingerprints
+// of length 40 are matched by regex separately.
+const PLACEHOLDER_BASTION = "https://gpsaml.example.com";
+const PLACEHOLDER_FINGERPRINT = "0000000000000000000000000000000000000000";
 
 // ── DOM ───────────────────────────────────────────────────────────
 const $bar = document.getElementById("bar");
@@ -40,6 +53,14 @@ const $disconnect = document.getElementById("disconnect");
 
 const $errMsg = document.getElementById("err-msg");
 const $errRetry = document.getElementById("err-retry");
+
+const $cfgDetails = document.getElementById("cfg-details");
+const $cfgBanner = document.getElementById("cfg-banner");
+const $cfgStatus = document.getElementById("cfg-status");
+const $cfgBastion = document.getElementById("cfg-bastion");
+const $cfgSecret = document.getElementById("cfg-secret");
+const $cfgFp = document.getElementById("cfg-fp");
+const $cfgSave = document.getElementById("cfg-save");
 
 // ── view state ────────────────────────────────────────────────────
 let selectedGateway = null;
@@ -260,6 +281,97 @@ $portal.addEventListener("input", async () => {
   await chrome.storage.local.set({ portal: v });
 });
 
+// ── bastion config UI ─────────────────────────────────────────────
+// Mirrors the four constants the bastion needs from config.js into a
+// form that writes to chrome.storage.local. background.js reads from
+// the same storage keys with these placeholders as fallback, so a
+// fresh install with an unconfigured config.js still surfaces the
+// "needs config" banner instead of mysteriously failing at signing.
+function looksLikeBastionUrl(s) {
+  return /^https?:\/\/[^\s]+$/i.test(s) && s !== PLACEHOLDER_BASTION;
+}
+function looksLikeSha1(s) {
+  return /^[0-9a-f]{40}$/i.test(s) && s !== PLACEHOLDER_FINGERPRINT;
+}
+
+function validateCfgInputs() {
+  const bastion = $cfgBastion.value.trim().replace(/\/+$/, "");
+  const secret = $cfgSecret.value;
+  const fp = $cfgFp.value.trim();
+  return {
+    bastion,
+    secret,
+    fp,
+    bastionOk: looksLikeBastionUrl(bastion),
+    secretOk: secret.length > 0,
+    fpOk: looksLikeSha1(fp),
+  };
+}
+
+function refreshCfgStatus() {
+  const v = validateCfgInputs();
+  const ok = v.bastionOk && v.secretOk && v.fpOk;
+  if (ok) {
+    $cfgStatus.textContent = "✓ ok";
+    $cfgStatus.className = "cfg-status ok";
+    $cfgBanner.style.display = "none";
+    $connect.disabled = false;
+    $connect.title = "";
+  } else {
+    const missing = [];
+    if (!v.bastionOk) missing.push("bastion");
+    if (!v.secretOk) missing.push("secret");
+    if (!v.fpOk) missing.push("fingerprint");
+    $cfgStatus.textContent = `· missing: ${missing.join(", ")}`;
+    $cfgStatus.className = "cfg-status bad";
+    $cfgBanner.style.display = "block";
+    $connect.disabled = true;
+    $connect.title = "Set Bastion config below first.";
+  }
+}
+
+async function loadCfgUI() {
+  const { bastion, bastionSecret, gatewayFingerprint } =
+    await chrome.storage.local.get(["bastion", "bastionSecret", "gatewayFingerprint"]);
+  $cfgBastion.value = bastion ?? DEFAULT_BASTION;
+  $cfgSecret.value = bastionSecret ?? DEFAULT_BASTION_SECRET;
+  $cfgFp.value = gatewayFingerprint ?? DEFAULT_GATEWAY_FINGERPRINT;
+  refreshCfgStatus();
+  // Auto-open the config panel if anything's still missing so the
+  // banner has an obvious next action.
+  const v = validateCfgInputs();
+  $cfgDetails.open = !(v.bastionOk && v.secretOk && v.fpOk);
+}
+
+[$cfgBastion, $cfgSecret, $cfgFp].forEach((el) =>
+  el.addEventListener("input", refreshCfgStatus)
+);
+
+$cfgSave.addEventListener("click", async () => {
+  const v = validateCfgInputs();
+  if (!v.bastionOk) {
+    showError(`Bastion URL needs to be an https:// hostname (not "${PLACEHOLDER_BASTION}").`);
+    return;
+  }
+  if (!v.secretOk) {
+    showError("Shared secret can't be empty. Match /etc/gpsaml-proxy/secret on the bastion.");
+    return;
+  }
+  if (!v.fpOk) {
+    showError("Gateway fingerprint must be 40 hex chars (SHA-1, no colons).");
+    return;
+  }
+  await chrome.storage.local.set({
+    bastion: v.bastion,
+    bastionSecret: v.secret,
+    gatewayFingerprint: v.fp.toUpperCase(),
+  });
+  const orig = $cfgSave.textContent;
+  $cfgSave.textContent = "Saved ✓";
+  setTimeout(() => ($cfgSave.textContent = orig), 1100);
+  refreshCfgStatus();
+});
+
 // ── connect intent ────────────────────────────────────────────────
 $connect.addEventListener("click", async () => {
   const portal = $portal.value.trim();
@@ -397,6 +509,7 @@ document.addEventListener("click", async (e) => {
 (async () => {
   $portal.value = await loadPortal();
   renderForwards(await loadForwards());
+  await loadCfgUI();
   const reply = await chrome.runtime.sendMessage({ kind: "get-state" });
   applyState(reply?.state);
 })();
