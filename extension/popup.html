@@ -492,6 +492,47 @@
       }
       @keyframes cur-blink { 50% { opacity: 0; } }
 
+      /* ── Bastion config form (inside the <details> in step 1) ── */
+      .cfg-grid {
+        display: flex; flex-direction: column;
+        gap: 12px;
+        margin-top: 12px;
+      }
+      .cfg-grid label .hint {
+        font-family: var(--font-text);
+        font-weight: 400;
+        font-size: 10px;
+        letter-spacing: 0;
+        text-transform: none;
+        color: var(--text-faint);
+        margin-left: 6px;
+      }
+      .cfg-grid input { font-family: var(--font-mono); font-size: 12px; }
+      .cfg-grid .cfg-tip {
+        margin: 0;
+        font-size: 10px;
+        color: var(--text-faint);
+        line-height: 1.55;
+      }
+      .cfg-grid .cfg-tip code {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        color: var(--orange-deep);
+        padding: 1px 4px;
+        border-radius: 3px;
+        font-size: 10px;
+        word-break: break-all;
+      }
+      .hint { font-family: var(--font-text); color: var(--text-faint); font-size: 10px; }
+      .cfg-status {
+        font-family: var(--font-mono);
+        font-size: 9px;
+        letter-spacing: 0.16em;
+        margin-left: 6px;
+      }
+      .cfg-status.ok { color: var(--ok); }
+      .cfg-status.bad { color: var(--alert); }
+
       .gw-list {
         display: flex; flex-direction: column; gap: 0;
         border: 1px solid var(--border);
@@ -544,6 +585,37 @@
         </div>
 
         <button class="primary" id="connect">Authenticate via SAML →</button>
+
+        <div class="callout" id="cfg-banner" style="display:none;">
+          <strong>Bastion config needed</strong>
+          Set <em>Bastion URL</em>, <em>Shared secret</em>, and <em>Gateway fingerprint</em>
+          below before connecting — the placeholders in <code>config.js</code> won't
+          authenticate against a real bastion.
+        </div>
+
+        <details id="cfg-details">
+          <summary>Bastion config <span id="cfg-status" class="cfg-status"></span></summary>
+          <div class="cfg-grid">
+            <div>
+              <label for="cfg-bastion">Bastion URL</label>
+              <input id="cfg-bastion" type="text" placeholder="https://gpsaml.example.com" autocomplete="off" spellcheck="false" />
+            </div>
+            <div>
+              <label for="cfg-secret">Shared secret <span class="hint">matches <code>/etc/gpsaml-proxy/secret</code></span></label>
+              <input id="cfg-secret" type="password" placeholder="base64(32 random bytes)" autocomplete="off" spellcheck="false" />
+            </div>
+            <div>
+              <label for="cfg-fp">Gateway SHA-1 fingerprint <span class="hint">40 hex chars, no colons</span></label>
+              <input id="cfg-fp" type="text" placeholder="0123456789ABCDEF…" autocomplete="off" spellcheck="false" maxlength="40" />
+            </div>
+            <button class="primary" id="cfg-save">Save</button>
+            <p class="hint cfg-tip">
+              Get the fingerprint with:<br>
+              <code>openssl s_client -connect &lt;gw&gt;:443 &lt;/dev/null | openssl x509 -fingerprint -sha1 -noout</code>
+              <br>then strip the colons. Generate a secret with: <code>head -c 32 /dev/urandom | base64</code>.
+            </p>
+          </div>
+        </details>
 
         <details>
           <summary>Forwards (<span id="fwd-count">0</span>)</summary>
